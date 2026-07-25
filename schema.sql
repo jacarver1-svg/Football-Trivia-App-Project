@@ -1,5 +1,3 @@
--- Football Trivia App: Postgres schema
-
 -- Football Trivia App: Postgres schema (v2)
 
 CREATE TABLE IF NOT EXISTS categories (

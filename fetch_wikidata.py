@@ -12,44 +12,77 @@ Usage:
     python fetch_wikidata.py
 """
 
+import os
 import time
 import requests
 import psycopg2
+from dotenv import load_dotenv
+
+# Reads key=value pairs from a local .env file and loads them into the
+# environment automatically — no need to type/set them each terminal session.
+load_dotenv()
 
 WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 
 # Be a good citizen: Wikidata asks for a descriptive User-Agent on all requests.
 HEADERS = {
-    "User-Agent": "FootballTriviaApp/0.1 (personal project; contact: jacarver1@gmail.com)"
+    "User-Agent": "FootballTriviaApp/0.1 (https://github.com/jacarver1-svg/Football-Trivia-App-Project; contact: jacarver1@gmail.com)"
 }
 
+# Credentials come from .env (which is gitignored, so it never gets committed).
+# See .env.example for the expected format.
 DB_CONFIG = {
-    "dbname": "football_trivia",
-    "user": "postgres",       # change if needed
-    "host": "localhost",
-    "port": 5432,
+    "dbname": os.environ.get("FOOTBALL_DB_NAME", "football_trivia"),
+    "user": os.environ.get("FOOTBALL_DB_USER", "postgres"),
+    "password": os.environ.get("FOOTBALL_DB_PASSWORD"),
+    "host": os.environ.get("FOOTBALL_DB_HOST", "localhost"),
+    "port": int(os.environ.get("FOOTBALL_DB_PORT", 5432)),
 }
 
-# Example SPARQL query: top football players by a given nationality,
-# with birth date, birth place, and current club.
 # Q937857 = "association football player" (occupation)
-# You can change the country QID (Q145 = United Kingdom, Q142 = France, etc.)
+# Q6581097 = "male" (sex or gender) — filters out women's footballers
 QUERY_TEMPLATE = """
-SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?clubLabel ?nationalityLabel WHERE {{
+SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?clubLabel WHERE {{
   ?player wdt:P106 wd:Q937857.        # occupation: football player
   ?player wdt:P27 wd:{country_qid}.   # country of citizenship
+  ?player wdt:P21 wd:Q6581097.        # sex or gender: male
   OPTIONAL {{ ?player wdt:P569 ?birthDate. }}
   OPTIONAL {{ ?player wdt:P19 ?birthPlace. }}
   OPTIONAL {{ ?player wdt:P54 ?club. }}
-  OPTIONAL {{ ?player wdt:P27 ?nationality. }}
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
 }}
 LIMIT {limit}
 """
 
 
-def fetch_players(country_qid="Q142", limit=50):
-    """Fetch players for a given country QID from Wikidata. Default: France."""
+def get_or_create_country(conn, name, wikidata_id):
+    """
+    Look up a country by name; insert it if it doesn't exist yet.
+    Returns the country's row id in our own `countries` table
+    (NOT the Wikidata QID — this is our own auto-incrementing id).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM countries WHERE name = %s;", (name,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+
+        cur.execute(
+            """
+            INSERT INTO countries (wikidata_id, name)
+            VALUES (%s, %s)
+            ON CONFLICT (wikidata_id) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id;
+            """,
+            (wikidata_id, name),
+        )
+        country_id = cur.fetchone()[0]
+    conn.commit()
+    return country_id
+
+
+def fetch_players(country_qid, limit=50):
+    """Fetch male players for a given country QID from Wikidata."""
     query = QUERY_TEMPLATE.format(country_qid=country_qid, limit=limit)
     response = requests.get(
         WIKIDATA_SPARQL_URL,
@@ -61,7 +94,7 @@ def fetch_players(country_qid="Q142", limit=50):
     return response.json()["results"]["bindings"]
 
 
-def parse_player(row):
+def parse_player(row, country_id):
     def get(field):
         return row.get(field, {}).get("value")
 
@@ -71,7 +104,7 @@ def parse_player(row):
         "name": get("playerLabel"),
         "birth_date": get("birthDate")[:10] if get("birthDate") else None,
         "birth_place": get("birthPlaceLabel"),
-        "nationality": get("nationalityLabel"),
+        "country_id": country_id,     # our own countries.id, not Wikidata's
         "current_club": get("clubLabel"),
     }
 
@@ -83,13 +116,13 @@ def insert_players(conn, players):
                 continue
             cur.execute(
                 """
-                INSERT INTO players (wikidata_id, name, birth_date, birth_place, nationality, current_club)
-                VALUES (%(wikidata_id)s, %(name)s, %(birth_date)s, %(birth_place)s, %(nationality)s, %(current_club)s)
+                INSERT INTO players (wikidata_id, name, birth_date, birth_place, country_id, current_club)
+                VALUES (%(wikidata_id)s, %(name)s, %(birth_date)s, %(birth_place)s, %(country_id)s, %(current_club)s)
                 ON CONFLICT (wikidata_id) DO UPDATE SET
                     name = EXCLUDED.name,
                     birth_date = EXCLUDED.birth_date,
                     birth_place = EXCLUDED.birth_place,
-                    nationality = EXCLUDED.nationality,
+                    country_id = EXCLUDED.country_id,
                     current_club = EXCLUDED.current_club;
                 """,
                 p,
@@ -98,7 +131,7 @@ def insert_players(conn, players):
 
 
 def main():
-    # A few example country QIDs to pull from. Add more as you like.
+    # Each entry: display name -> Wikidata country QID.
     countries = {
         "France": "Q142",
         "Brazil": "Q155",
@@ -110,8 +143,14 @@ def main():
 
     for country_name, qid in countries.items():
         print(f"Fetching players for {country_name}...")
+
+        # Resolve (or create) this country's row ONCE per country,
+        # not once per player — every player from this batch shares
+        # the same country_id.
+        country_id = get_or_create_country(conn, country_name, qid)
+
         rows = fetch_players(country_qid=qid, limit=50)
-        players = [parse_player(r) for r in rows]
+        players = [parse_player(r, country_id) for r in rows]
         insert_players(conn, players)
         print(f"  Inserted/updated {len(players)} players.")
         time.sleep(1)  # polite delay between queries
