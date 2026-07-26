@@ -23,9 +23,12 @@ CREATE TABLE IF NOT EXISTS players (
     birth_date DATE,
     birth_place TEXT,
     country_id INT REFERENCES countries(id),   -- nationality
-    position TEXT,
-    current_club TEXT
+    position TEXT
 );
+
+-- Drops the old loose text field for anyone who already ran an earlier
+-- version of this schema. Safe to re-run: does nothing if already dropped.
+ALTER TABLE players DROP COLUMN IF EXISTS current_club;
 
 CREATE TABLE IF NOT EXISTS leagues (
     id SERIAL PRIMARY KEY,
@@ -61,8 +64,13 @@ CREATE TABLE IF NOT EXISTS player_clubs (
     player_id INT REFERENCES players(id),
     club_id INT REFERENCES clubs(id),
     start_year INT,
-    end_year INT               -- NULL means current
+    end_year INT,               -- NULL means current
+    transfer_type TEXT          -- e.g. 'loan', 'transfer', 'free transfer'; NULL if unspecified
 );
+
+-- Adds the column for anyone who already ran an earlier version of this
+-- schema. Safe to re-run: does nothing if the column already exists.
+ALTER TABLE player_clubs ADD COLUMN IF NOT EXISTS transfer_type TEXT;
 
 CREATE TABLE IF NOT EXISTS trophies (
     id SERIAL PRIMARY KEY,
@@ -138,3 +146,9 @@ CREATE INDEX IF NOT EXISTS idx_answers_question ON answers(question_id);
 CREATE INDEX IF NOT EXISTS idx_player_clubs_player ON player_clubs(player_id);
 CREATE INDEX IF NOT EXISTS idx_player_clubs_club ON player_clubs(club_id);
 CREATE INDEX IF NOT EXISTS idx_club_trophies_club ON club_trophies(club_id);
+
+-- Prevents duplicate rows for the same player/club/start_year if the
+-- fetch script is run more than once. ON CONFLICT in the script relies
+-- on this existing.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_player_clubs_unique
+    ON player_clubs(player_id, club_id, start_year);

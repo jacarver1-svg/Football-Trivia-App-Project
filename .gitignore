@@ -4,3 +4,4 @@ venv/
 .venv/
 .env
 node_modules/
+fetch_progress.json
