@@ -50,7 +50,7 @@ SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?clubLabel WHERE {{
   OPTIONAL {{ ?player wdt:P569 ?birthDate. }}
   OPTIONAL {{ ?player wdt:P19 ?birthPlace. }}
   OPTIONAL {{ ?player wdt:P54 ?club. }}
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
 }}
 LIMIT {limit}
 """
@@ -98,7 +98,7 @@ SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel
   FILTER(YEAR(?start) <= {target_season})
   FILTER(!BOUND(?end) || YEAR(?end) >= {target_season})
 
-  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
 }}
 ORDER BY ?player
 OFFSET {offset}
@@ -374,7 +374,7 @@ def run_country_pull(conn):
         time.sleep(1)
 
 
-def run_league_pull(conn, limit_per_league=200, target_season=CURRENT_SEASON_YEAR):
+def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEAR):
     """
     Pull players from EACH league separately, restricted to memberships
     active during target_season, continuing from wherever the last run
