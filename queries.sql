@@ -85,6 +85,66 @@ ORDER BY num_stints DESC
 LIMIT 10;
 
 
+-- ---------- ADDITIONAL SANITY CHECKS (run after any fetch) ----------
+
+-- Any transfer_type values that are just numbers (like the "2016" bug)
+SELECT players.name, clubs.name, player_clubs.transfer_type
+FROM player_clubs
+JOIN players ON players.id = player_clubs.player_id
+JOIN clubs ON clubs.id = player_clubs.club_id
+WHERE transfer_type ~ '^[0-9]+$';
+
+-- Stints where end_year is BEFORE start_year (should never happen)
+SELECT players.name, clubs.name, player_clubs.start_year, player_clubs.end_year
+FROM player_clubs
+JOIN players ON players.id = player_clubs.player_id
+JOIN clubs ON clubs.id = player_clubs.club_id
+WHERE end_year IS NOT NULL AND end_year < start_year;
+
+-- Players/clubs/countries/trophies whose name is just a raw Wikidata QID
+-- (means the label service found no usable name for that item)
+SELECT id, name, wikidata_id FROM players WHERE name ~ '^Q[0-9]+$';
+SELECT id, name, wikidata_id FROM clubs WHERE name ~ '^Q[0-9]+$';
+SELECT id, name, wikidata_id FROM countries WHERE name ~ '^Q[0-9]+$';
+SELECT id, name, wikidata_id FROM trophies WHERE name ~ '^Q[0-9]+$';
+
+-- Duplicate club/player names with different wikidata_ids — could be
+-- genuine (two real people/clubs sharing a name), but worth a glance
+-- before writing a question that assumes uniqueness
+SELECT name, COUNT(*) FROM clubs GROUP BY name HAVING COUNT(*) > 1;
+SELECT name, COUNT(*) FROM players GROUP BY name HAVING COUNT(*) > 1;
+
+-- Clubs missing a country / players missing a nationality
+SELECT name, wikidata_id FROM clubs WHERE country_id IS NULL;
+SELECT name, wikidata_id FROM players WHERE country_id IS NULL;
+
+-- Founded years / trophy seasons that look implausible
+SELECT name, founded_year FROM clubs
+WHERE founded_year IS NOT NULL AND (founded_year < 1850 OR founded_year > 2026);
+
+SELECT clubs.name, trophies.name, club_trophies.season_start_year
+FROM club_trophies
+JOIN clubs ON clubs.id = club_trophies.club_id
+JOIN trophies ON trophies.id = club_trophies.trophy_id
+WHERE season_start_year < 1850 OR season_start_year > 2026;
+
+-- Players who joined a club before they were even born (red flag for
+-- bad qualifier data on Wikidata)
+SELECT players.name, clubs.name, players.birth_date, player_clubs.start_year
+FROM player_clubs
+JOIN players ON players.id = player_clubs.player_id
+JOIN clubs ON clubs.id = player_clubs.club_id
+WHERE players.birth_date IS NOT NULL
+  AND player_clubs.start_year < EXTRACT(YEAR FROM players.birth_date);
+
+-- club_league_seasons entries with a dangling club_id or league_id
+-- (shouldn't happen given foreign keys, but confirms integrity at a glance)
+SELECT COUNT(*) FROM club_league_seasons cls
+LEFT JOIN clubs ON clubs.id = cls.club_id
+LEFT JOIN leagues ON leagues.id = cls.league_id
+WHERE clubs.id IS NULL OR leagues.id IS NULL;
+
+
 -- ---------- QUESTION-GENERATION READINESS CHECKS ----------
 
 -- How many clubs have stadium/founded_year filled in (from enrich_club)
