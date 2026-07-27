@@ -9,20 +9,10 @@ Usage:
     python manage_questions.py list    # view all questions currently in the database
 """
 
-import os
 import sys
 import psycopg2
-from dotenv import load_dotenv
 
-load_dotenv()
-
-DB_CONFIG = {
-    "dbname": os.environ.get("FOOTBALL_DB_NAME", "football_trivia"),
-    "user": os.environ.get("FOOTBALL_DB_USER", "postgres"),
-    "password": os.environ.get("FOOTBALL_DB_PASSWORD"),
-    "host": os.environ.get("FOOTBALL_DB_HOST", "localhost"),
-    "port": int(os.environ.get("FOOTBALL_DB_PORT", 5432)),
-}
+from config import DB_CONFIG
 
 
 def get_or_create_category(conn, name):

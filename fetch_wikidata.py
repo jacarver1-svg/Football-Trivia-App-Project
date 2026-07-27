@@ -6,39 +6,36 @@ Once it's in your `football_trivia` database, it's yours to query forever
 with no rate limits and no cost.
 
 Setup:
-    pip install requests psycopg2-binary
+    pip install requests psycopg2-binary python-dotenv
 
 Usage:
     python fetch_wikidata.py
+
+All tunable settings (leagues, season, DB connection, request pacing,
+retry behavior) live in config.py — edit that file, not this one, to
+change them.
 """
 
-import os
 import json
 import time
 import requests
 import psycopg2
-from dotenv import load_dotenv
 
-# Reads key=value pairs from a local .env file and loads them into the
-# environment automatically — no need to type/set them each terminal session.
-load_dotenv()
-
-WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
-
-# Be a good citizen: Wikidata asks for a descriptive User-Agent on all requests.
-HEADERS = {
-    "User-Agent": "FootballTriviaApp/0.1 (personal project; contact: your-email@example.com)"
-}
-
-# Credentials come from .env (which is gitignored, so it never gets committed).
-# See .env.example for the expected format.
-DB_CONFIG = {
-    "dbname": os.environ.get("FOOTBALL_DB_NAME", "football_trivia"),
-    "user": os.environ.get("FOOTBALL_DB_USER", "postgres"),
-    "password": os.environ.get("FOOTBALL_DB_PASSWORD"),
-    "host": os.environ.get("FOOTBALL_DB_HOST", "localhost"),
-    "port": int(os.environ.get("FOOTBALL_DB_PORT", 5432)),
-}
+from config import (
+    DB_CONFIG,
+    HEADERS,
+    WIKIDATA_SPARQL_URL,
+    LEAGUES,
+    CURRENT_SEASON_YEAR,
+    SPARQL_TIMEOUT,
+    MAX_RETRIES,
+    RETRY_BASE_WAIT,
+    RATE_LIMIT_FALLBACK_WAIT,
+    DEFAULT_LIMIT_PER_LEAGUE,
+    ENRICH_SLEEP_SECONDS,
+    LEAGUE_SLEEP_SECONDS,
+    PROGRESS_FILE,
+)
 
 # Q937857 = "association football player" (occupation)
 # Q6581097 = "male" (sex or gender) — filters out women's footballers
@@ -108,17 +105,6 @@ LIMIT {limit}
 # Wikidata's P118 ("league") reflects a club's CURRENT league, not a
 # season-by-season history. We don't have a reliable way to know which
 # season that corresponds to for each row, so club_league_seasons entries
-# from this script are recorded under this single "current season" marker.
-# Update this each year, or replace with real historical data later if
-# you want proper season-by-season league history.
-# Wikidata's P118 ("league") reflects a club's CURRENT league, not a
-# season-by-season history. We don't have a reliable way to know which
-# season that corresponds to for each row, so club_league_seasons entries
-# from this script are recorded under this single "current season" marker.
-# Update this each year, or replace with real historical data later if
-# you want proper season-by-season league history.
-CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
-
 CLUB_DETAILS_QUERY = """
 SELECT ?stadiumLabel ?founded WHERE {{
   OPTIONAL {{ wd:{club_qid} wdt:P115 ?stadium. }}   # home venue
@@ -138,12 +124,16 @@ SELECT ?award ?awardLabel ?year WHERE {{
 """
 
 
-def run_sparql_query(query, max_retries=3):
+def run_sparql_query(query, max_retries=MAX_RETRIES):
     """
     Shared request helper for every SPARQL query in this script.
-    Handles two kinds of transient failure differently:
-      - 502/503/504: server-side infrastructure hiccups — safe to retry
-        with a short, fixed backoff.
+    Handles three kinds of transient failure differently:
+      - Timeout: the query itself took too long for Wikidata to compute
+        (common with the heavier qualifier-based queries this script
+        uses). Retried with a short backoff — this is not a rate-limit
+        issue, just a slow query, so a plain retry is appropriate.
+      - 502/503/504: server-side infrastructure hiccups — also safe to
+        retry with a short, fixed backoff.
       - 429: Wikidata EXPLICITLY telling us to slow down. This is not a
         random hiccup — it's a real rate-limit signal. We respect their
         Retry-After header if they send one (the correct way to respond
@@ -155,23 +145,33 @@ def run_sparql_query(query, max_retries=3):
                 WIKIDATA_SPARQL_URL,
                 params={"query": query, "format": "json"},
                 headers=HEADERS,
-                timeout=30,
+                timeout=SPARQL_TIMEOUT,
             )
             response.raise_for_status()
             return response.json()["results"]["bindings"]
+
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                wait = RETRY_BASE_WAIT * attempt
+                print(f"  Query timed out (>{SPARQL_TIMEOUT}s). Retrying in {wait}s "
+                      f"(attempt {attempt}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise
+
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
 
             if status == 429 and attempt < max_retries:
                 retry_after = e.response.headers.get("Retry-After")
-                wait = int(retry_after) if retry_after and retry_after.isdigit() else 30 * attempt
+                wait = int(retry_after) if retry_after and retry_after.isdigit() else RATE_LIMIT_FALLBACK_WAIT * attempt
                 print(f"  Got 429 (rate limited) from Wikidata. Waiting {wait}s before retrying "
                       f"(attempt {attempt}/{max_retries})...")
                 time.sleep(wait)
                 continue
 
             if status in (502, 503, 504) and attempt < max_retries:
-                wait = 5 * attempt
+                wait = RETRY_BASE_WAIT * attempt
                 print(f"  Got {status} from Wikidata, retrying in {wait}s (attempt {attempt}/{max_retries})...")
                 time.sleep(wait)
                 continue
@@ -277,7 +277,7 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
             founded_raw = get("founded")
             founded_year = int(founded_raw[:4]) if founded_raw else None
             update_club_details(conn, club_id, stadium, founded_year)
-        time.sleep(1.5)
+        time.sleep(ENRICH_SLEEP_SECONDS)
 
     trophy_rows = fetch_club_trophies(club_qid)
     for row in trophy_rows:
@@ -295,13 +295,9 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
 
         trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team")
         link_club_trophy(conn, club_id, trophy_id, season_year)
-    time.sleep(1.5)
+    time.sleep(ENRICH_SLEEP_SECONDS)
 
-# Tracks how far into each league's result list we've already paginated,
-# so re-running the script fetches the NEXT page of players instead of
-# re-fetching (or randomly landing on) the same ones. Stored locally,
-# not in the database — this is just bookkeeping for the fetch process.
-PROGRESS_FILE = "fetch_progress.json"
+# Progress tracking helpers use PROGRESS_FILE, imported from config.py.
 
 
 def load_progress():
@@ -540,7 +536,7 @@ def run_country_pull(conn):
         time.sleep(1)
 
 
-def run_league_pull(conn, limit_per_league=50, target_season=CURRENT_SEASON_YEAR):
+def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_season=CURRENT_SEASON_YEAR):
     """
     Pull players from EACH league separately, restricted to memberships
     active during target_season, continuing from wherever the last run
@@ -618,7 +614,7 @@ def run_league_pull(conn, limit_per_league=50, target_season=CURRENT_SEASON_YEAR
                     conn, player_id, club_id, r["start_year"], r["end_year"], r["transfer_type"]
                 )
 
-        time.sleep(1)  # polite delay between leagues
+        time.sleep(LEAGUE_SLEEP_SECONDS)  # polite delay between leagues
 
         # Advance progress by however many rows actually came back (not
         # the requested limit) — this naturally stops growing once a
