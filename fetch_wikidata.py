@@ -130,39 +130,25 @@ LIMIT 1
 
 CLUB_TROPHIES_QUERY = """
 SELECT ?award ?awardLabel ?year WHERE {{
-  wd:{club_qid} p:P166 ?awardStmt.        # award received (used for competition wins)
-  ?awardStmt ps:P166 ?award.
+  wd:{club_qid} p:P2522 ?awardStmt.       # competition won (the correct property for league/cup titles)
+  ?awardStmt ps:P2522 ?award.
   OPTIONAL {{ ?awardStmt pq:P585 ?year. }}  # qualifier: point in time (year won)
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
 }}
 """
 
 
-def fetch_club_details(club_qid, max_retries=3):
-    """Fetch a club's stadium and founding year. Returns one row or None."""
-    query = CLUB_DETAILS_QUERY.format(club_qid=club_qid)
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = requests.get(
-                WIKIDATA_SPARQL_URL,
-                params={"query": query, "format": "json"},
-                headers=HEADERS,
-                timeout=30,
-            )
-            response.raise_for_status()
-            rows = response.json()["results"]["bindings"]
-            return rows[0] if rows else None
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status in (502, 503, 504) and attempt < max_retries:
-                time.sleep(5 * attempt)
-                continue
-            raise
-
-
-def fetch_club_trophies(club_qid, max_retries=3):
-    """Fetch every 'award received' entry for a club, with the year if known."""
-    query = CLUB_TROPHIES_QUERY.format(club_qid=club_qid)
+def run_sparql_query(query, max_retries=3):
+    """
+    Shared request helper for every SPARQL query in this script.
+    Handles two kinds of transient failure differently:
+      - 502/503/504: server-side infrastructure hiccups — safe to retry
+        with a short, fixed backoff.
+      - 429: Wikidata EXPLICITLY telling us to slow down. This is not a
+        random hiccup — it's a real rate-limit signal. We respect their
+        Retry-After header if they send one (the correct way to respond
+        to a 429), and fall back to a longer wait if they don't.
+    """
     for attempt in range(1, max_retries + 1):
         try:
             response = requests.get(
@@ -175,10 +161,35 @@ def fetch_club_trophies(club_qid, max_retries=3):
             return response.json()["results"]["bindings"]
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
-            if status in (502, 503, 504) and attempt < max_retries:
-                time.sleep(5 * attempt)
+
+            if status == 429 and attempt < max_retries:
+                retry_after = e.response.headers.get("Retry-After")
+                wait = int(retry_after) if retry_after and retry_after.isdigit() else 30 * attempt
+                print(f"  Got 429 (rate limited) from Wikidata. Waiting {wait}s before retrying "
+                      f"(attempt {attempt}/{max_retries})...")
+                time.sleep(wait)
                 continue
-            raise
+
+            if status in (502, 503, 504) and attempt < max_retries:
+                wait = 5 * attempt
+                print(f"  Got {status} from Wikidata, retrying in {wait}s (attempt {attempt}/{max_retries})...")
+                time.sleep(wait)
+                continue
+
+            raise  # not retryable, or out of retries — let it fail loudly
+
+
+def fetch_club_details(club_qid, max_retries=3):
+    """Fetch a club's stadium and founding year. Returns one row or None."""
+    query = CLUB_DETAILS_QUERY.format(club_qid=club_qid)
+    rows = run_sparql_query(query, max_retries=max_retries)
+    return rows[0] if rows else None
+
+
+def fetch_club_trophies(club_qid, max_retries=3):
+    """Fetch every 'competition won' entry for a club, with the year if known."""
+    query = CLUB_TROPHIES_QUERY.format(club_qid=club_qid)
+    return run_sparql_query(query, max_retries=max_retries)
 
 
 def update_club_details(conn, club_id, stadium, founded_year):
@@ -266,7 +277,7 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
             founded_raw = get("founded")
             founded_year = int(founded_raw[:4]) if founded_raw else None
             update_club_details(conn, club_id, stadium, founded_year)
-        time.sleep(0.5)
+        time.sleep(1.5)
 
     trophy_rows = fetch_club_trophies(club_qid)
     for row in trophy_rows:
@@ -284,7 +295,7 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
 
         trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team")
         link_club_trophy(conn, club_id, trophy_id, season_year)
-    time.sleep(0.5)
+    time.sleep(1.5)
 
 # Tracks how far into each league's result list we've already paginated,
 # so re-running the script fetches the NEXT page of players instead of
@@ -428,32 +439,14 @@ def fetch_top_league_players(league_qid, target_season, limit=50, offset=0, max_
     (a plain LIMIT with no ORDER BY has no guaranteed order, so re-running
     it just returns an arbitrary, possibly-repeated slice).
 
-    Retries on transient server errors (502/503/504), which Wikidata's
-    public endpoint occasionally returns under load — these are not
-    caused by anything wrong with the query itself.
+    Uses the shared run_sparql_query() helper, which retries on transient
+    server errors (502/503/504) and respects Wikidata's rate-limit
+    signals (429 + Retry-After) if we're going too fast.
     """
     query = LEAGUE_QUERY_TEMPLATE.format(
         league_qids=f"wd:{league_qid}", target_season=target_season, offset=offset, limit=limit
     )
-
-    for attempt in range(1, max_retries + 1):
-        try:
-            response = requests.get(
-                WIKIDATA_SPARQL_URL,
-                params={"query": query, "format": "json"},
-                headers=HEADERS,
-                timeout=60,
-            )
-            response.raise_for_status()
-            return response.json()["results"]["bindings"]
-        except requests.exceptions.HTTPError as e:
-            status = e.response.status_code if e.response is not None else None
-            if status in (502, 503, 504) and attempt < max_retries:
-                wait = 5 * attempt  # 5s, then 10s, then 15s
-                print(f"  Got {status} from Wikidata, retrying in {wait}s (attempt {attempt}/{max_retries})...")
-                time.sleep(wait)
-                continue
-            raise  # not a retryable error, or out of retries — let it fail loudly
+    return run_sparql_query(query, max_retries=max_retries)
 
 
 def parse_league_row(row):
