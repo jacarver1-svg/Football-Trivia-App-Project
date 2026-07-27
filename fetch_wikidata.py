@@ -231,23 +231,42 @@ def link_club_trophy(conn, club_id, trophy_id, season_start_year):
     conn.commit()
 
 
-def enrich_club(conn, club_id, club_qid):
+def club_already_enriched(conn, club_id):
+    """
+    Checks the DATABASE (not just this run's in-memory set) for whether
+    a club already has enrichment data — so re-running the script on a
+    different season doesn't waste requests re-fetching stadium/founding
+    info for clubs you already have. Trophies aren't checked here since
+    a club could genuinely win a new trophy over time, so those still
+    get re-fetched each run (harmless — ON CONFLICT DO NOTHING skips
+    exact duplicates).
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT stadium, founded_year FROM clubs WHERE id = %s;", (club_id,))
+        row = cur.fetchone()
+        return row is not None and row[0] is not None and row[1] is not None
+
+
+def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
     """
     One-time-per-club lookup for stadium, founding year, and every trophy
     Wikidata has on record for them (with a year attached). Called once
     per unique club per run — see the `enriched_clubs` set in
     run_league_pull(), so a club with 30 players doesn't trigger 30
-    redundant Wikidata requests.
+    redundant Wikidata requests within the same run.
     """
-    details = fetch_club_details(club_qid)
-    if details:
-        def get(field):
-            return details.get(field, {}).get("value")
-        stadium = get("stadiumLabel")
-        founded_raw = get("founded")
-        founded_year = int(founded_raw[:4]) if founded_raw else None
-        update_club_details(conn, club_id, stadium, founded_year)
-    time.sleep(0.5)
+    if skip_details_if_present and club_already_enriched(conn, club_id):
+        print(f"    (club already has stadium/founded_year, skipping details fetch)")
+    else:
+        details = fetch_club_details(club_qid)
+        if details:
+            def get(field):
+                return details.get(field, {}).get("value")
+            stadium = get("stadiumLabel")
+            founded_raw = get("founded")
+            founded_year = int(founded_raw[:4]) if founded_raw else None
+            update_club_details(conn, club_id, stadium, founded_year)
+        time.sleep(0.5)
 
     trophy_rows = fetch_club_trophies(club_qid)
     for row in trophy_rows:
@@ -528,7 +547,7 @@ def run_country_pull(conn):
         time.sleep(1)
 
 
-def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEAR):
+def run_league_pull(conn, limit_per_league=50, target_season=CURRENT_SEASON_YEAR):
     """
     Pull players from EACH league separately, restricted to memberships
     active during target_season, continuing from wherever the last run
@@ -542,7 +561,8 @@ def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEA
     total_rows = 0
 
     for league_name, league_qid in LEAGUES.items():
-        offset = progress.get(league_name, 0)
+        progress_key = f"{league_name}_{target_season}"
+        offset = progress.get(progress_key, 0)
         print(f"Fetching {league_name} ({target_season}/{str(target_season + 1)[-2:]} season), offset {offset}...")
         rows = fetch_top_league_players(league_qid, target_season, limit=limit_per_league, offset=offset)
         parsed = [parse_league_row(r) for r in rows]
@@ -611,7 +631,7 @@ def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEA
         # the requested limit) — this naturally stops growing once a
         # league runs out of new matches, rather than drifting past the
         # real end of that league's results.
-        progress[league_name] = offset + len(parsed)
+        progress[progress_key] = offset + len(parsed)
         save_progress(progress)
         if len(parsed) < limit_per_league:
             print(f"  (Got fewer than requested — {league_name} may be running low on new matches.)")
