@@ -111,7 +111,161 @@ LIMIT {limit}
 # from this script are recorded under this single "current season" marker.
 # Update this each year, or replace with real historical data later if
 # you want proper season-by-season league history.
+# Wikidata's P118 ("league") reflects a club's CURRENT league, not a
+# season-by-season history. We don't have a reliable way to know which
+# season that corresponds to for each row, so club_league_seasons entries
+# from this script are recorded under this single "current season" marker.
+# Update this each year, or replace with real historical data later if
+# you want proper season-by-season league history.
 CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
+
+CLUB_DETAILS_QUERY = """
+SELECT ?stadiumLabel ?founded WHERE {{
+  OPTIONAL {{ wd:{club_qid} wdt:P115 ?stadium. }}   # home venue
+  OPTIONAL {{ wd:{club_qid} wdt:P571 ?founded. }}    # inception (founding date)
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+}}
+LIMIT 1
+"""
+
+CLUB_TROPHIES_QUERY = """
+SELECT ?award ?awardLabel ?year WHERE {{
+  wd:{club_qid} p:P166 ?awardStmt.        # award received (used for competition wins)
+  ?awardStmt ps:P166 ?award.
+  OPTIONAL {{ ?awardStmt pq:P585 ?year. }}  # qualifier: point in time (year won)
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+}}
+"""
+
+
+def fetch_club_details(club_qid, max_retries=3):
+    """Fetch a club's stadium and founding year. Returns one row or None."""
+    query = CLUB_DETAILS_QUERY.format(club_qid=club_qid)
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(
+                WIKIDATA_SPARQL_URL,
+                params={"query": query, "format": "json"},
+                headers=HEADERS,
+                timeout=30,
+            )
+            response.raise_for_status()
+            rows = response.json()["results"]["bindings"]
+            return rows[0] if rows else None
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (502, 503, 504) and attempt < max_retries:
+                time.sleep(5 * attempt)
+                continue
+            raise
+
+
+def fetch_club_trophies(club_qid, max_retries=3):
+    """Fetch every 'award received' entry for a club, with the year if known."""
+    query = CLUB_TROPHIES_QUERY.format(club_qid=club_qid)
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(
+                WIKIDATA_SPARQL_URL,
+                params={"query": query, "format": "json"},
+                headers=HEADERS,
+                timeout=30,
+            )
+            response.raise_for_status()
+            return response.json()["results"]["bindings"]
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status in (502, 503, 504) and attempt < max_retries:
+                time.sleep(5 * attempt)
+                continue
+            raise
+
+
+def update_club_details(conn, club_id, stadium, founded_year):
+    """Fills in stadium/founded_year without overwriting existing values with NULL."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            UPDATE clubs SET
+                stadium = COALESCE(%s, stadium),
+                founded_year = COALESCE(%s, founded_year)
+            WHERE id = %s;
+            """,
+            (stadium, founded_year, club_id),
+        )
+    conn.commit()
+
+
+def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team"):
+    """Same upsert pattern as everything else, for trophies."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM trophies WHERE wikidata_id = %s;", (wikidata_id,))
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        cur.execute(
+            """
+            INSERT INTO trophies (wikidata_id, name, type)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (wikidata_id) DO UPDATE SET name = EXCLUDED.name
+            RETURNING id;
+            """,
+            (wikidata_id, name, trophy_type),
+        )
+        trophy_id = cur.fetchone()[0]
+    conn.commit()
+    return trophy_id
+
+
+def link_club_trophy(conn, club_id, trophy_id, season_start_year):
+    """Insert a club_trophies row, ignoring if it already exists."""
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO club_trophies (club_id, trophy_id, season_start_year)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (club_id, trophy_id, season_start_year) DO NOTHING;
+            """,
+            (club_id, trophy_id, season_start_year),
+        )
+    conn.commit()
+
+
+def enrich_club(conn, club_id, club_qid):
+    """
+    One-time-per-club lookup for stadium, founding year, and every trophy
+    Wikidata has on record for them (with a year attached). Called once
+    per unique club per run — see the `enriched_clubs` set in
+    run_league_pull(), so a club with 30 players doesn't trigger 30
+    redundant Wikidata requests.
+    """
+    details = fetch_club_details(club_qid)
+    if details:
+        def get(field):
+            return details.get(field, {}).get("value")
+        stadium = get("stadiumLabel")
+        founded_raw = get("founded")
+        founded_year = int(founded_raw[:4]) if founded_raw else None
+        update_club_details(conn, club_id, stadium, founded_year)
+    time.sleep(0.5)
+
+    trophy_rows = fetch_club_trophies(club_qid)
+    for row in trophy_rows:
+        award_uri = row.get("award", {}).get("value")
+        award_qid = award_uri.split("/")[-1] if award_uri else None
+        award_name = row.get("awardLabel", {}).get("value")
+        year_raw = row.get("year", {}).get("value")
+        season_year = int(year_raw[:4]) if year_raw else None
+
+        # Skip anything missing a year — a trophy we can't date isn't
+        # useful for "how many has X won" or "who won it in season Y"
+        # questions, and season_start_year is NOT NULL in the schema.
+        if not award_qid or not award_name or not season_year:
+            continue
+
+        trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team")
+        link_club_trophy(conn, club_id, trophy_id, season_year)
+    time.sleep(0.5)
 
 # Tracks how far into each league's result list we've already paginated,
 # so re-running the script fetches the NEXT page of players instead of
@@ -384,6 +538,7 @@ def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEA
     progress = load_progress()
     league_counts = {}
     players_seen = set()
+    enriched_clubs = set()  # tracks which club_ids we've already enriched THIS run
     total_rows = 0
 
     for league_name, league_qid in LEAGUES.items():
@@ -432,6 +587,12 @@ def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEA
                 conn, r["club_wikidata_id"], r["club_name"], club_country_id
             )
 
+            # Fetch stadium/founded_year/trophies ONCE per club per run,
+            # not once per player — clubs get revisited by many players.
+            if club_id not in enriched_clubs:
+                enrich_club(conn, club_id, r["club_wikidata_id"])
+                enriched_clubs.add(club_id)
+
             # --- league, and linking club to it for the current season ---
             league_id = get_or_create_league(conn, league_name, league_qid)
             link_club_to_league(conn, club_id, league_id, target_season)
@@ -455,7 +616,7 @@ def run_league_pull(conn, limit_per_league=250, target_season=CURRENT_SEASON_YEA
         if len(parsed) < limit_per_league:
             print(f"  (Got fewer than requested — {league_name} may be running low on new matches.)")
 
-    print(f"Processed {total_rows} rows, {len(players_seen)} unique players, across {len(LEAGUES)} leagues.")
+    print(f"Processed {total_rows} rows, {len(players_seen)} unique players, {len(enriched_clubs)} clubs enriched (stadium/founded/trophies), across {len(LEAGUES)} leagues.")
     print("Breakdown by league (row matches, not unique players):")
     for league_name in LEAGUES:
         count = league_counts.get(league_name, 0)
