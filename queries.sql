@@ -85,7 +85,41 @@ ORDER BY num_stints DESC
 LIMIT 10;
 
 
--- ---------- EXAMPLE TRIVIA-STYLE QUERIES ----------
+-- ---------- QUESTION-GENERATION READINESS CHECKS ----------
+
+-- How many clubs have stadium/founded_year filled in (from enrich_club)
+SELECT
+    COUNT(*) AS total_clubs,
+    COUNT(stadium) AS with_stadium,
+    COUNT(founded_year) AS with_founded_year
+FROM clubs;
+
+-- How many club_trophies rows exist, and for how many distinct clubs/trophies
+SELECT
+    COUNT(*) AS total_trophy_records,
+    COUNT(DISTINCT club_id) AS distinct_clubs_with_trophies,
+    COUNT(DISTINCT trophy_id) AS distinct_trophy_types
+FROM club_trophies;
+
+-- Which trophies actually came through (useful before trusting them in questions)
+SELECT trophies.name, COUNT(*) AS times_awarded
+FROM club_trophies
+JOIN trophies ON trophies.id = club_trophies.trophy_id
+GROUP BY trophies.name
+ORDER BY times_awarded DESC;
+
+-- How many player_clubs stints have a usable transfer_type (for loan/transfer questions)
+SELECT transfer_type, COUNT(*)
+FROM player_clubs
+WHERE transfer_type IS NOT NULL
+GROUP BY transfer_type;
+
+-- How many players have a known nationality (for "what nationality is X" questions)
+SELECT
+    COUNT(*) AS total_players,
+    COUNT(country_id) AS with_nationality
+FROM players;
+
 
 -- Which trophies has a specific player won (individual + team, via the view)
 SELECT trophies.name, ptw.season_year, ptw.win_type
