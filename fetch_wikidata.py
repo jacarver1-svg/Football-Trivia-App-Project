@@ -16,6 +16,7 @@ retry behavior) live in config.py — edit that file, not this one, to
 change them.
 """
 
+import os
 import json
 import time
 import requests
