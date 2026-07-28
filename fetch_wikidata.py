@@ -158,6 +158,20 @@ def run_sparql_query(query, max_retries=MAX_RETRIES):
                 continue
             raise
 
+        except requests.exceptions.ConnectionError:
+            # The connection itself was dropped mid-request (no HTTP status
+            # at all) — a stronger signal than a timeout or a 502. Could be
+            # a transient network blip, but could also mean the server is
+            # actively rejecting sustained traffic from this IP. Backs off
+            # much more conservatively than the other transient errors.
+            if attempt < max_retries:
+                wait = RATE_LIMIT_FALLBACK_WAIT * attempt
+                print(f"  Connection was reset by the remote host. Waiting {wait}s before "
+                      f"retrying (attempt {attempt}/{max_retries})...")
+                time.sleep(wait)
+                continue
+            raise
+
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
 
