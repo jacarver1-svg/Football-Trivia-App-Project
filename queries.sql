@@ -38,14 +38,18 @@ FROM players
 LEFT JOIN countries ON countries.id = players.country_id
 ORDER BY players.name;
 
--- Full picture: players, clubs, leagues, stint dates, transfer type
+-- Full picture: players, clubs, MOST RECENT league/season, stint dates,
+-- transfer type. Uses a LATERAL join to grab just the latest season per
+-- club, avoiding duplicate-looking rows now that clubs can have several
+-- club_league_seasons entries (multiple pulls, promotions/relegations).
 SELECT
     players.name AS player,
     countries.name AS nationality,
     players.birth_date,
+    players.position,
     clubs.name AS club,
-    club_countries.name AS club_country,
     leagues.name AS league,
+    latest_season.season_start_year,
     player_clubs.start_year,
     player_clubs.end_year,
     player_clubs.transfer_type
@@ -53,10 +57,78 @@ FROM players
 LEFT JOIN countries ON countries.id = players.country_id
 LEFT JOIN player_clubs ON player_clubs.player_id = players.id
 LEFT JOIN clubs ON clubs.id = player_clubs.club_id
-LEFT JOIN countries AS club_countries ON club_countries.id = clubs.country_id
-LEFT JOIN club_league_seasons ON club_league_seasons.club_id = clubs.id
-LEFT JOIN leagues ON leagues.id = club_league_seasons.league_id
+LEFT JOIN LATERAL (
+    SELECT cls.league_id, cls.season_start_year
+    FROM club_league_seasons cls
+    WHERE cls.club_id = clubs.id
+    ORDER BY cls.season_start_year DESC
+    LIMIT 1
+) latest_season ON true
+LEFT JOIN leagues ON leagues.id = latest_season.league_id
 ORDER BY players.name, player_clubs.start_year;
+
+
+-- ---------- PLAYER POSITIONS ----------
+
+-- How many players have a position filled in
+SELECT COUNT(*) AS total_players, COUNT(position) AS with_position
+FROM players;
+
+-- Breakdown by position (useful sanity check — should be a handful of
+-- sensible values: goalkeeper, defender, midfielder, forward, etc.,
+-- not a long tail of oddities)
+SELECT position, COUNT(*)
+FROM players
+WHERE position IS NOT NULL
+GROUP BY position
+ORDER BY COUNT(*) DESC;
+
+
+-- ---------- EXPANDED LEAGUE COVERAGE (18 tracked leagues) ----------
+
+-- Player count per league (current squads, via most recent club_league_seasons)
+SELECT leagues.name AS league, COUNT(DISTINCT players.id) AS player_count
+FROM players
+JOIN player_clubs ON player_clubs.player_id = players.id
+JOIN clubs ON clubs.id = player_clubs.club_id
+JOIN club_league_seasons ON club_league_seasons.club_id = clubs.id
+JOIN leagues ON leagues.id = club_league_seasons.league_id
+GROUP BY leagues.name
+ORDER BY player_count DESC;
+
+-- Club count per league (sanity check — a top flight typically has
+-- ~18-24 clubs; wildly off numbers are worth a second look)
+SELECT leagues.name AS league, COUNT(DISTINCT clubs.id) AS club_count
+FROM club_league_seasons
+JOIN clubs ON clubs.id = club_league_seasons.club_id
+JOIN leagues ON leagues.id = club_league_seasons.league_id
+GROUP BY leagues.name
+ORDER BY club_count DESC;
+
+-- Any tracked league with ZERO players pulled — worth investigating
+-- (a wrong QID, a P118/roster coverage gap, etc.)
+SELECT leagues.name
+FROM leagues
+LEFT JOIN club_league_seasons ON club_league_seasons.league_id = leagues.id
+WHERE club_league_seasons.id IS NULL;
+
+
+-- ---------- TROPHY COMPETITIONS (24 tracked) ----------
+
+-- Champion seasons recorded per competition (leagues + cups + UCL/UEL)
+SELECT
+    COALESCE(parent_leagues.name, 'cup / continental') AS competition_type,
+    trophies.name,
+    club_trophies.season_start_year
+FROM club_trophies
+JOIN trophies ON trophies.id = club_trophies.trophy_id
+LEFT JOIN leagues AS parent_leagues ON parent_leagues.id = trophies.parent_league_id
+ORDER BY competition_type, club_trophies.season_start_year DESC
+LIMIT 50;
+
+-- Which tracked competitions have NO champion data at all yet
+SELECT name FROM leagues
+WHERE id NOT IN (SELECT DISTINCT parent_league_id FROM trophies WHERE parent_league_id IS NOT NULL);
 
 
 -- ---------- DATA QUALITY CHECKS ----------
