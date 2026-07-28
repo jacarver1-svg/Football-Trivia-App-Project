@@ -56,16 +56,6 @@ SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?clubLabel WHERE {{
 LIMIT {limit}
 """
 
-# Add/remove leagues here — display name -> Wikidata QID.
-# Look up new ones at wikidata.org (search the league, QID is on the item page).
-LEAGUES = {
-    "Premier League": "Q9448",
-    "La Liga": "Q324867",
-    "Bundesliga": "Q82595",
-    "Serie A": "Q15804",
-    "Ligue 1": "Q13394",
-}
-
 # Pulls players across ANY of the leagues listed in LEAGUES, in one request,
 # instead of looping per country. Captures each player's own nationality
 # inline, since we're no longer fixing the country ahead of time.
@@ -371,12 +361,97 @@ def extract_season_start_year(season_label, start_time_value):
     return None
 
 
-def fetch_all_competition_champions(conn):
+def fetch_predecessor_competitions(competition_qid, max_retries=MAX_RETRIES):
+    """
+    Walks Wikidata's 'replaces' (P1365) chain backward from a competition,
+    returning EVERY predecessor it can find, however many rebrands deep
+    (the '+' in the property path means one-or-more hops, so this finds
+    the whole chain in a single request, not just the most recent rename).
+
+    E.g. querying Premier League's QID returns Football League First
+    Division, and would keep walking further back if that itself had a
+    'replaces' link.
+    """
+    query = f"""
+    SELECT ?predecessor ?predecessorLabel WHERE {{
+      wd:{competition_qid} wdt:P1365+ ?predecessor.
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+    }}
+    """
+    return run_sparql_query(query, max_retries=max_retries)
+
+
+def process_champion_rows(conn, rows, parent_league_id):
+    """
+    Shared logic for turning SPARQL champion rows into database rows —
+    used for both a competition's own history AND any predecessor
+    competitions found via fetch_predecessor_competitions(). Passing the
+    SAME parent_league_id for both is what merges pre-rebrand and
+    post-rebrand titles into one continuous history under a single
+    leagues row.
+    """
+    saved = 0
+    for row in rows:
+        def get(field):
+            return row.get(field, {}).get("value")
+
+        season_uri = get("season")
+        season_qid = season_uri.split("/")[-1] if season_uri else None
+        season_name = get("seasonLabel")
+        start_time = get("startTime")
+        season_start_year = extract_season_start_year(season_name, start_time)
+
+        winner_uri = get("winner")
+        winner_qid = winner_uri.split("/")[-1] if winner_uri else None
+        winner_name = get("winnerLabel")
+
+        if not season_qid or not season_name or not winner_qid or not winner_name or not season_start_year:
+            continue  # incomplete row — skip rather than store a guess
+
+        winner_country_id = None
+        winner_country_qid = get("winnerCountry")
+        winner_country_qid = winner_country_qid.split("/")[-1] if winner_country_qid else None
+        winner_country_name = get("winnerCountryLabel")
+        if winner_country_qid and winner_country_name:
+            winner_country_id = get_or_create_country(conn, winner_country_name, winner_country_qid)
+
+        club_id = get_or_create_club(conn, winner_qid, winner_name, winner_country_id)
+        trophy_id = get_or_create_trophy(conn, season_qid, season_name, "team", parent_league_id)
+        link_club_trophy(conn, club_id, trophy_id, season_start_year)
+        saved += 1
+    return saved
+
+
+def preview_predecessor_chains():
+    """
+    Shows what fetch_all_competition_champions() WOULD pull in via the
+    'replaces' chain for every tracked competition — without writing
+    anything to the database. Run this first, review the output, and
+    only enable include_predecessors=True once you're satisfied the
+    chains look right (no unexpected competitions, no suspiciously long
+    chains for a competition you don't recognize).
+    """
+    for competition_name, competition_qid in TROPHY_COMPETITIONS.items():
+        predecessors = fetch_predecessor_competitions(competition_qid)
+        if not predecessors:
+            print(f"{competition_name}: no predecessors found.")
+            continue
+        names = [p.get("predecessorLabel", {}).get("value", "?") for p in predecessors]
+        print(f"{competition_name}: would also merge in -> {', '.join(names)}")
+
+
+def fetch_all_competition_champions(conn, include_predecessors=False):
     """
     Populates trophies/club_trophies with COMPLETE champion history for
     every competition in TROPHY_COMPETITIONS — one request per
     competition, not one per club. Run this once per session; it's
     independent of the player-pulling logic in run_league_pull().
+
+    If include_predecessors is True, also walks each competition's
+    'replaces' chain (rebrands like Premier League <- Football League
+    First Division) and folds those older titles into the SAME leagues
+    row, so trophy counts reflect the competition's full history
+    regardless of what it was called at the time.
     """
     for competition_name, competition_qid in TROPHY_COMPETITIONS.items():
         print(f"Fetching champion history for {competition_name}...")
@@ -389,35 +464,22 @@ def fetch_all_competition_champions(conn):
             parent_league_id = match[0] if match else None
 
         rows = fetch_competition_champions(competition_qid)
-        saved = 0
+        saved = process_champion_rows(conn, rows, parent_league_id)
 
-        for row in rows:
-            def get(field):
-                return row.get(field, {}).get("value")
-
-            season_uri = get("season")
-            season_qid = season_uri.split("/")[-1] if season_uri else None
-            season_name = get("seasonLabel")
-            start_time = get("startTime")
-            season_start_year = extract_season_start_year(season_name, start_time)
-
-            winner_uri = get("winner")
-            winner_qid = winner_uri.split("/")[-1] if winner_uri else None
-            winner_name = get("winnerLabel")
-
-            if not season_qid or not season_name or not winner_qid or not winner_name or not season_start_year:
-                continue  # incomplete row — skip rather than store a guess
-
-            winner_country_id = None
-            winner_country_qid = get("winnerCountry")
-            winner_country_qid = winner_country_qid.split("/")[-1] if winner_country_qid else None
-            winner_country_name = get("winnerCountryLabel")
-            if winner_country_qid and winner_country_name:
-                winner_country_id = get_or_create_country(conn, winner_country_name, winner_country_qid)
-
-            club_id = get_or_create_club(conn, winner_qid, winner_name, winner_country_id)
-            trophy_id = get_or_create_trophy(conn, season_qid, season_name, "team", parent_league_id)
-            link_club_trophy(conn, club_id, trophy_id, season_start_year)
+        if include_predecessors:
+            predecessors = fetch_predecessor_competitions(competition_qid)
+            for pred in predecessors:
+                pred_uri = pred.get("predecessor", {}).get("value")
+                pred_qid = pred_uri.split("/")[-1] if pred_uri else None
+                pred_name = pred.get("predecessorLabel", {}).get("value", "unknown predecessor")
+                if not pred_qid:
+                    continue
+                print(f"  Also fetching predecessor: {pred_name}...")
+                pred_rows = fetch_competition_champions(pred_qid)
+                # Same parent_league_id as above — this is what merges
+                # the pre-rebrand titles into the current league's history.
+                saved += process_champion_rows(conn, pred_rows, parent_league_id)
+                time.sleep(LEAGUE_SLEEP_SECONDS)
             saved += 1
 
         print(f"  {saved} champion season(s) recorded for {competition_name}.")
