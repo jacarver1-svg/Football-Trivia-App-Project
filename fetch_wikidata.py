@@ -394,6 +394,31 @@ def link_club_to_league(conn, club_id, league_id, season_start_year):
     conn.commit()
 
 
+def stint_dates_look_valid(start_year, end_year, birth_date):
+    """
+    Sanity-checks a club stint's dates before it gets inserted, catching
+    the same kinds of bad Wikidata qualifier data your diagnostic
+    queries look for after the fact (e.g. joining a club before being
+    born, or an end_year before the start_year). Returns (is_valid,
+    cleaned_start_year, cleaned_end_year, reason) — invalid individual
+    fields get nulled out rather than rejecting the whole row outright,
+    since often only ONE of the two dates is actually wrong.
+    """
+    reason = None
+
+    if end_year is not None and start_year is not None and end_year < start_year:
+        reason = f"end_year ({end_year}) before start_year ({start_year}) — dropping end_year"
+        end_year = None
+
+    if start_year is not None and birth_date is not None:
+        birth_year = int(str(birth_date)[:4])
+        if start_year < birth_year:
+            reason = f"start_year ({start_year}) before birth year ({birth_year}) — dropping start_year"
+            start_year = None
+
+    return (start_year, end_year, reason)
+
+
 def link_player_to_club(conn, player_id, club_id, start_year, end_year, transfer_type):
     """
     Insert a player_clubs row (one stint), relying on the unique index
@@ -611,9 +636,15 @@ def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_seas
             # start_year is required by the unique index; skip linking if
             # Wikidata didn't have a start date qualifier for this membership.
             if r["start_year"]:
-                link_player_to_club(
-                    conn, player_id, club_id, r["start_year"], r["end_year"], r["transfer_type"]
+                clean_start, clean_end, issue = stint_dates_look_valid(
+                    r["start_year"], r["end_year"], r["birth_date"]
                 )
+                if issue:
+                    print(f"    Data quality note for {r['player_name']} at {r['club_name']}: {issue}")
+                if clean_start:  # only proceed if start_year survived validation
+                    link_player_to_club(
+                        conn, player_id, club_id, clean_start, clean_end, r["transfer_type"]
+                    )
 
         time.sleep(LEAGUE_SLEEP_SECONDS)  # polite delay between leagues
 
