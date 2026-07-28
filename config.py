@@ -46,10 +46,10 @@ LEAGUES = {
 # season-by-season history, so this single value is used as the season
 # marker for club_league_seasons entries, and as the default filter for
 # which club memberships count as "active" in a pull.
-CURRENT_SEASON_YEAR = 2024  # represents the 2024/25 season
+CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
 
 # ---------- Pull sizing ----------
-DEFAULT_LIMIT_PER_LEAGUE = 400
+DEFAULT_LIMIT_PER_LEAGUE = 10
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
@@ -57,6 +57,28 @@ DEFAULT_LIMIT_PER_LEAGUE = 400
 # on heavier qualifier-based queries under load.
 ENRICH_SLEEP_SECONDS = 1.5   # delay between a club's detail/trophy requests
 LEAGUE_SLEEP_SECONDS = 1     # delay between leagues within one pull
+
+# ---------- Competitions to fetch COMPLETE champion history for ----------
+# Unlike per-club discovery (which only surfaces what's backfilled on
+# each club's own page), this queries each COMPETITION directly for
+# every season and its winner — far more complete, and much cheaper
+# (one request per competition instead of one per club). Includes your
+# five tracked leagues (their QIDs match the LEAGUES dict above, so
+# their trophies get parent_league_id linked automatically) plus any
+# cup/continental competitions you want full history for.
+TROPHY_COMPETITIONS = {
+    "Premier League": "Q9448",
+    "La Liga": "Q324867",
+    "Bundesliga": "Q82595",
+    "Serie A": "Q15804",
+    "Ligue 1": "Q13394",
+    "UEFA Champions League": "Q18756",
+    "UEFA Europa League": "Q18760",
+    "FA Cup": "Q11151",
+    "Copa del Rey": "Q483794",
+    "DFB-Pokal": "Q150880",
+    "Coupe de France": "Q212412",
+}
 
 # ---------- Trophies ----------
 # If set to a year (e.g. 2025), club trophy pulls only fetch competitions
