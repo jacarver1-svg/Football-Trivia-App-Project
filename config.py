@@ -46,10 +46,10 @@ LEAGUES = {
 # season-by-season history, so this single value is used as the season
 # marker for club_league_seasons entries, and as the default filter for
 # which club memberships count as "active" in a pull.
-CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
+CURRENT_SEASON_YEAR = 2024  # represents the 2024/25 season
 
 # ---------- Pull sizing ----------
-DEFAULT_LIMIT_PER_LEAGUE = 50
+DEFAULT_LIMIT_PER_LEAGUE = 400
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
@@ -57,6 +57,13 @@ DEFAULT_LIMIT_PER_LEAGUE = 50
 # on heavier qualifier-based queries under load.
 ENRICH_SLEEP_SECONDS = 1.5   # delay between a club's detail/trophy requests
 LEAGUE_SLEEP_SECONDS = 1     # delay between leagues within one pull
+
+# ---------- Trophies ----------
+# If set to a year (e.g. 2025), club trophy pulls only fetch competitions
+# won in/around that year, instead of a club's entire trophy history.
+# Set to None to pull full history (more useful for "how many trophies
+# has X won all-time" questions, but noisier and slightly slower).
+TROPHY_SEASON_FILTER = None
 
 # ---------- Progress tracking ----------
 PROGRESS_FILE = "fetch_progress.json"
