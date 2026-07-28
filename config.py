@@ -23,7 +23,7 @@ DB_CONFIG = {
 WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
 
 HEADERS = {
-    "User-Agent": "FootballTriviaApp/0.1 (personal project; contact: your-email@example.com)"
+    "User-Agent": "FootballTriviaApp/0.1 (https://github.com/jacarver1-svg/Football-Trivia-App-Project; contact: jacarver1@gmail.com)"
 }
 
 SPARQL_TIMEOUT = 60          # seconds to wait for a single query response before giving up
@@ -39,6 +39,19 @@ LEAGUES = {
     "Bundesliga": "Q82595",
     "Serie A": "Q15804",
     "Ligue 1": "Q13394",
+    "EFL Championship": "Q19510",
+    "LaLiga 2": "Q35615",
+    "2. Bundesliga": "Q152665",
+    "Serie B": "Q194052",
+    "Ligue 2": "Q217374",
+    "Major League Soccer": "Q18543",
+    "Primeira Liga": "Q182994",
+    "Eredivisie": "Q167541",
+    "J1 League": "Q276445",
+    "Campeonato Brasileiro Série A": "Q206813",
+    "Argentine Primera División": "Q223170",
+    "Danish Superliga": "Q204752",
+    "Belgian Pro League": "Q216022",
 }
 
 # ---------- Season ----------
@@ -49,7 +62,7 @@ LEAGUES = {
 CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
 
 # ---------- Pull sizing ----------
-DEFAULT_LIMIT_PER_LEAGUE = 10
+DEFAULT_LIMIT_PER_LEAGUE = 200
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
