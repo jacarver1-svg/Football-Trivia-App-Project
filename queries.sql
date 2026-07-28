@@ -181,6 +181,38 @@ SELECT
 FROM players;
 
 
+-- ---------- LEAGUE CHAMPIONS (uses trophies.parent_league_id) ----------
+
+-- Which club won which season of a specific tracked league (only shows
+-- genuine league titles, not cups/continental trophies/stray junk)
+SELECT clubs.name AS champion, club_trophies.season_start_year
+FROM club_trophies
+JOIN clubs ON clubs.id = club_trophies.club_id
+JOIN trophies ON trophies.id = club_trophies.trophy_id
+JOIN leagues ON leagues.id = trophies.parent_league_id
+WHERE leagues.name = 'Premier League'
+ORDER BY club_trophies.season_start_year DESC;
+
+-- Same, but across ALL five tracked leagues at once
+SELECT leagues.name AS league, clubs.name AS champion, club_trophies.season_start_year
+FROM club_trophies
+JOIN clubs ON clubs.id = club_trophies.club_id
+JOIN trophies ON trophies.id = club_trophies.trophy_id
+JOIN leagues ON leagues.id = trophies.parent_league_id
+ORDER BY leagues.name, club_trophies.season_start_year DESC;
+
+-- How many trophies are linked to a tracked league vs. not (gut-check
+-- on how much of your trophy data is genuine league titles vs. other)
+SELECT
+    COUNT(*) FILTER (WHERE parent_league_id IS NOT NULL) AS league_title_trophies,
+    COUNT(*) FILTER (WHERE parent_league_id IS NULL) AS other_trophies
+FROM trophies;
+
+-- Trophies NOT linked to a tracked league — eyeball these to see what's
+-- actually in there (cups, continental competitions, or leftover junk)
+SELECT name FROM trophies WHERE parent_league_id IS NULL ORDER BY name;
+
+
 -- Which trophies has a specific player won (individual + team, via the view)
 SELECT trophies.name, ptw.season_year, ptw.win_type
 FROM player_trophy_wins ptw

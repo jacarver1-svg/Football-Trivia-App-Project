@@ -68,7 +68,7 @@ LEAGUES = {
 # instead of looping per country. Captures each player's own nationality
 # inline, since we're no longer fixing the country ahead of time.
 LEAGUE_QUERY_TEMPLATE = """
-SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel
+SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?position ?positionLabel
        ?club ?clubLabel ?clubCountry ?clubCountryLabel
        ?nationality ?nationalityLabel
        ?league ?leagueLabel
@@ -89,6 +89,7 @@ SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel
   OPTIONAL {{ ?membership pq:P1642 ?transferType. }}  # qualifier: acquisition transaction (loan/transfer/free transfer)
   OPTIONAL {{ ?player wdt:P569 ?birthDate. }}
   OPTIONAL {{ ?player wdt:P19 ?birthPlace. }}
+  OPTIONAL {{ ?player wdt:P413 ?position. }}          # position played on team / speciality
 
   # Only keep memberships that were active during the target season —
   # started on or before it, and either still ongoing or didn't end
@@ -518,6 +519,7 @@ def parse_league_row(row):
         "player_name": get("playerLabel"),
         "birth_date": get("birthDate")[:10] if get("birthDate") else None,
         "birth_place": get("birthPlaceLabel"),
+        "position": get("positionLabel"),
         "nationality_wikidata_id": qid("nationality"),
         "nationality_name": get("nationalityLabel"),
         "club_wikidata_id": qid("club"),
@@ -544,13 +546,14 @@ def get_or_create_player(conn, player_dict):
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO players (wikidata_id, name, birth_date, birth_place, country_id)
-            VALUES (%(wikidata_id)s, %(name)s, %(birth_date)s, %(birth_place)s, %(country_id)s)
+            INSERT INTO players (wikidata_id, name, birth_date, birth_place, country_id, position)
+            VALUES (%(wikidata_id)s, %(name)s, %(birth_date)s, %(birth_place)s, %(country_id)s, %(position)s)
             ON CONFLICT (wikidata_id) DO UPDATE SET
                 name = EXCLUDED.name,
                 birth_date = EXCLUDED.birth_date,
                 birth_place = EXCLUDED.birth_place,
-                country_id = EXCLUDED.country_id
+                country_id = EXCLUDED.country_id,
+                position = EXCLUDED.position
             RETURNING id;
             """,
             player_dict,
@@ -584,6 +587,7 @@ def run_country_pull(conn):
                 "birth_date": get("birthDate")[:10] if get("birthDate") else None,
                 "birth_place": get("birthPlaceLabel"),
                 "country_id": country_id,
+                "position": None,  # this older query path doesn't fetch position
             }
             if get_or_create_player(conn, player_dict) is not None:
                 count += 1
@@ -631,6 +635,7 @@ def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_seas
                 "birth_date": r["birth_date"],
                 "birth_place": r["birth_place"],
                 "country_id": country_id,
+                "position": r["position"],
             })
             if player_id is None:
                 continue
