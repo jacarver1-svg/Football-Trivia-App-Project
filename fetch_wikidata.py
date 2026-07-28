@@ -17,6 +17,7 @@ change them.
 """
 
 import os
+import re
 import json
 import time
 import requests
@@ -27,6 +28,7 @@ from config import (
     HEADERS,
     WIKIDATA_SPARQL_URL,
     LEAGUES,
+    TROPHY_COMPETITIONS,
     CURRENT_SEASON_YEAR,
     SPARQL_TIMEOUT,
     MAX_RETRIES,
@@ -327,6 +329,99 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
         trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team", parent_league_id)
         link_club_trophy(conn, club_id, trophy_id, season_year)
     time.sleep(ENRICH_SLEEP_SECONDS)
+
+
+COMPETITION_CHAMPIONS_QUERY = """
+SELECT ?season ?seasonLabel ?startTime ?winner ?winnerLabel ?winnerCountry ?winnerCountryLabel WHERE {{
+  ?season wdt:P3450 wd:{competition_qid}.  # season is an edition of this competition
+  ?season wdt:P1346 ?winner.                # winner of that season — this is authoritative,
+                                              # maintained on the competition/season page itself,
+                                              # not dependent on each club backfilling their own page
+  OPTIONAL {{ ?season wdt:P580 ?startTime. }}  # season start date, when recorded on the season item
+  OPTIONAL {{ ?winner wdt:P17 ?winnerCountry. }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+}}
+"""
+
+
+def fetch_competition_champions(competition_qid, max_retries=MAX_RETRIES):
+    """
+    Fetch EVERY known season and its winner for one competition, in a
+    single request — far more complete than asking each club what
+    they've won, since competition/season pages tend to be far more
+    consistently maintained than individual club pages.
+    """
+    query = COMPETITION_CHAMPIONS_QUERY.format(competition_qid=competition_qid)
+    return run_sparql_query(query, max_retries=max_retries)
+
+
+def extract_season_start_year(season_label, start_time_value):
+    """
+    Prefer the season item's own start-time property when present (most
+    reliable). Falls back to parsing the leading 4-digit year out of the
+    season's label (e.g. "2015-16 Premier League" -> 2015), since that
+    format is consistent for these competitions even when P580 is missing.
+    """
+    if start_time_value:
+        return int(start_time_value[:4])
+    if season_label:
+        match = re.match(r"^(\d{4})", season_label)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def fetch_all_competition_champions(conn):
+    """
+    Populates trophies/club_trophies with COMPLETE champion history for
+    every competition in TROPHY_COMPETITIONS — one request per
+    competition, not one per club. Run this once per session; it's
+    independent of the player-pulling logic in run_league_pull().
+    """
+    for competition_name, competition_qid in TROPHY_COMPETITIONS.items():
+        print(f"Fetching champion history for {competition_name}...")
+
+        # If this competition IS one of your tracked leagues, its season
+        # trophies should link back via parent_league_id.
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM leagues WHERE wikidata_id = %s;", (competition_qid,))
+            match = cur.fetchone()
+            parent_league_id = match[0] if match else None
+
+        rows = fetch_competition_champions(competition_qid)
+        saved = 0
+
+        for row in rows:
+            def get(field):
+                return row.get(field, {}).get("value")
+
+            season_uri = get("season")
+            season_qid = season_uri.split("/")[-1] if season_uri else None
+            season_name = get("seasonLabel")
+            start_time = get("startTime")
+            season_start_year = extract_season_start_year(season_name, start_time)
+
+            winner_uri = get("winner")
+            winner_qid = winner_uri.split("/")[-1] if winner_uri else None
+            winner_name = get("winnerLabel")
+
+            if not season_qid or not season_name or not winner_qid or not winner_name or not season_start_year:
+                continue  # incomplete row — skip rather than store a guess
+
+            winner_country_id = None
+            winner_country_qid = get("winnerCountry")
+            winner_country_qid = winner_country_qid.split("/")[-1] if winner_country_qid else None
+            winner_country_name = get("winnerCountryLabel")
+            if winner_country_qid and winner_country_name:
+                winner_country_id = get_or_create_country(conn, winner_country_name, winner_country_qid)
+
+            club_id = get_or_create_club(conn, winner_qid, winner_name, winner_country_id)
+            trophy_id = get_or_create_trophy(conn, season_qid, season_name, "team", parent_league_id)
+            link_club_trophy(conn, club_id, trophy_id, season_start_year)
+            saved += 1
+
+        print(f"  {saved} champion season(s) recorded for {competition_name}.")
+        time.sleep(LEAGUE_SLEEP_SECONDS)
 
 # Progress tracking helpers use PROGRESS_FILE, imported from config.py.
 
@@ -705,6 +800,10 @@ def main():
     # Comment/uncomment whichever pull you want to run.
     run_league_pull(conn)
     # run_country_pull(conn)
+
+    # Complete champion history for your tracked leagues + UCL — cheap
+    # (one request per competition), independent of the player pull above.
+    fetch_all_competition_champions(conn)
 
     conn.close()
     print("Done. Data is now in your local Postgres database.")
