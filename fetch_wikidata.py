@@ -117,11 +117,13 @@ LIMIT 1
 """
 
 CLUB_TROPHIES_QUERY = """
-SELECT ?award ?awardLabel ?year WHERE {{
+SELECT ?award ?awardLabel ?year ?parentLeague ?parentLeagueLabel WHERE {{
   wd:{club_qid} p:P2522 ?awardStmt.       # competition won (the correct property for league/cup titles)
   ?awardStmt ps:P2522 ?award.
   ?awardStmt pq:P585 ?year.               # qualifier: point in time (year won) — required, not optional,
                                             # so the FILTER below has something to check
+  OPTIONAL {{ ?award wdt:P3450 ?parentLeague. }}  # if this IS a season-specific league title,
+                                                    # this points back to the parent league itself
   {year_filter}
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
 }}
@@ -216,21 +218,27 @@ def update_club_details(conn, club_id, stadium, founded_year):
     conn.commit()
 
 
-def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team"):
+def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team", parent_league_id=None):
     """Same upsert pattern as everything else, for trophies."""
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM trophies WHERE wikidata_id = %s;", (wikidata_id,))
         row = cur.fetchone()
         if row:
+            if parent_league_id is not None:
+                cur.execute(
+                    "UPDATE trophies SET parent_league_id = %s WHERE id = %s;",
+                    (parent_league_id, row[0]),
+                )
+                conn.commit()
             return row[0]
         cur.execute(
             """
-            INSERT INTO trophies (wikidata_id, name, type)
-            VALUES (%s, %s, %s)
+            INSERT INTO trophies (wikidata_id, name, type, parent_league_id)
+            VALUES (%s, %s, %s, %s)
             ON CONFLICT (wikidata_id) DO UPDATE SET name = EXCLUDED.name
             RETURNING id;
             """,
-            (wikidata_id, name, trophy_type),
+            (wikidata_id, name, trophy_type, parent_league_id),
         )
         trophy_id = cur.fetchone()[0]
     conn.commit()
@@ -296,13 +304,26 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
         year_raw = row.get("year", {}).get("value")
         season_year = int(year_raw[:4]) if year_raw else None
 
+        parent_league_uri = row.get("parentLeague", {}).get("value")
+        parent_league_qid = parent_league_uri.split("/")[-1] if parent_league_uri else None
+        parent_league_id = None
+        if parent_league_qid:
+            # Only resolves if this parent league is one you actually
+            # track (matches a wikidata_id already in your leagues
+            # table) — league titles from leagues outside your tracked
+            # five will just leave this NULL, which is fine.
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM leagues WHERE wikidata_id = %s;", (parent_league_qid,))
+                match = cur.fetchone()
+                parent_league_id = match[0] if match else None
+
         # Skip anything missing a year — a trophy we can't date isn't
         # useful for "how many has X won" or "who won it in season Y"
         # questions, and season_start_year is NOT NULL in the schema.
         if not award_qid or not award_name or not season_year:
             continue
 
-        trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team")
+        trophy_id = get_or_create_trophy(conn, award_qid, award_name, "team", parent_league_id)
         link_club_trophy(conn, club_id, trophy_id, season_year)
     time.sleep(ENRICH_SLEEP_SECONDS)
 
