@@ -33,12 +33,28 @@ RATE_LIMIT_FALLBACK_WAIT = 30  # seconds, scaled by attempt number, for 429s wit
 
 # ---------- Leagues to pull from ----------
 # Add or remove leagues here. Look up new QIDs at wikidata.org.
+# LEAGUES = {
+#     "Premier League": "Q9448",
+#     "La Liga": "Q324867",
+#     "Bundesliga": "Q82595",
+#     "Serie A": "Q15804",
+#     "Ligue 1": "Q13394",
+#     "EFL Championship": "Q19510",
+#     "LaLiga 2": "Q35615",
+#     "2. Bundesliga": "Q152665",
+#     "Serie B": "Q194052",
+#     "Ligue 2": "Q217374",
+#     "Major League Soccer": "Q18543",
+#     "Primeira Liga": "Q182994",
+#     "Eredivisie": "Q167541",
+#     "J1 League": "Q276445",
+#     "Campeonato Brasileiro Série A": "Q206813",
+#     "Argentine Primera División": "Q223170",
+#     "Danish Superliga": "Q204752",
+#     "Belgian Pro League": "Q216022",
+# }
+
 LEAGUES = {
-    "Premier League": "Q9448",
-    "La Liga": "Q324867",
-    "Bundesliga": "Q82595",
-    "Serie A": "Q15804",
-    "Ligue 1": "Q13394",
     "EFL Championship": "Q19510",
     "LaLiga 2": "Q35615",
     "2. Bundesliga": "Q152665",
@@ -62,7 +78,7 @@ LEAGUES = {
 CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
 
 # ---------- Pull sizing ----------
-DEFAULT_LIMIT_PER_LEAGUE = 200
+DEFAULT_LIMIT_PER_LEAGUE = 400
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
@@ -79,18 +95,34 @@ LEAGUE_SLEEP_SECONDS = 1     # delay between leagues within one pull
 # five tracked leagues (their QIDs match the LEAGUES dict above, so
 # their trophies get parent_league_id linked automatically) plus any
 # cup/continental competitions you want full history for.
+# TROPHY_COMPETITIONS = {
+#     "Premier League": "Q9448",
+#     "La Liga": "Q324867",
+#     "Bundesliga": "Q82595",
+#     "Serie A": "Q15804",
+#     "Ligue 1": "Q13394",
+#     "UEFA Champions League": "Q18756",
+#     "UEFA Europa League": "Q18760",
+#     "FA Cup": "Q11151",
+#     "Copa del Rey": "Q483794",
+#     "DFB-Pokal": "Q150880",
+#     "Coupe de France": "Q212412",
+# }
+
 TROPHY_COMPETITIONS = {
-    "Premier League": "Q9448",
-    "La Liga": "Q324867",
-    "Bundesliga": "Q82595",
-    "Serie A": "Q15804",
-    "Ligue 1": "Q13394",
-    "UEFA Champions League": "Q18756",
-    "UEFA Europa League": "Q18760",
-    "FA Cup": "Q11151",
-    "Copa del Rey": "Q483794",
-    "DFB-Pokal": "Q150880",
-    "Coupe de France": "Q212412",
+    "EFL Championship": "Q19510",
+    "LaLiga 2": "Q35615",
+    "2. Bundesliga": "Q152665",
+    "Serie B": "Q194052",
+    "Ligue 2": "Q217374",
+    "Major League Soccer": "Q18543",
+    "Primeira Liga": "Q182994",
+    "Eredivisie": "Q167541",
+    "J1 League": "Q276445",
+    "Campeonato Brasileiro Série A": "Q206813",
+    "Argentine Primera División": "Q223170",
+    "Danish Superliga": "Q204752",
+    "Belgian Pro League": "Q216022",
 }
 
 # ---------- Trophies ----------
