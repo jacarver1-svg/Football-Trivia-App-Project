@@ -35,6 +35,7 @@ from config import (
     DEFAULT_LIMIT_PER_LEAGUE,
     ENRICH_SLEEP_SECONDS,
     LEAGUE_SLEEP_SECONDS,
+    TROPHY_SEASON_FILTER,
     PROGRESS_FILE,
 )
 
@@ -119,7 +120,9 @@ CLUB_TROPHIES_QUERY = """
 SELECT ?award ?awardLabel ?year WHERE {{
   wd:{club_qid} p:P2522 ?awardStmt.       # competition won (the correct property for league/cup titles)
   ?awardStmt ps:P2522 ?award.
-  OPTIONAL {{ ?awardStmt pq:P585 ?year. }}  # qualifier: point in time (year won)
+  ?awardStmt pq:P585 ?year.               # qualifier: point in time (year won) — required, not optional,
+                                            # so the FILTER below has something to check
+  {year_filter}
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
 }}
 """
@@ -187,9 +190,14 @@ def fetch_club_details(club_qid, max_retries=3):
     return rows[0] if rows else None
 
 
-def fetch_club_trophies(club_qid, max_retries=3):
-    """Fetch every 'competition won' entry for a club, with the year if known."""
-    query = CLUB_TROPHIES_QUERY.format(club_qid=club_qid)
+def fetch_club_trophies(club_qid, max_retries=3, season_filter=TROPHY_SEASON_FILTER):
+    """
+    Fetch every 'competition won' entry for a club, with the year it was
+    won. If season_filter is set (a year, e.g. 2025), only trophies won
+    that year are fetched — otherwise, full trophy history is pulled.
+    """
+    year_filter = f"FILTER(YEAR(?year) = {season_filter})" if season_filter else ""
+    query = CLUB_TROPHIES_QUERY.format(club_qid=club_qid, year_filter=year_filter)
     return run_sparql_query(query, max_retries=max_retries)
 
 
