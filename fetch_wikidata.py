@@ -38,6 +38,8 @@ from config import (
     ENRICH_SLEEP_SECONDS,
     LEAGUE_SLEEP_SECONDS,
     TROPHY_SEASON_FILTER,
+    FETCH_COMPETITION_CHAMPIONS,
+    ENRICH_CLUB_TROPHIES,
     PROGRESS_FILE,
 )
 
@@ -303,6 +305,9 @@ def enrich_club(conn, club_id, club_qid, skip_details_if_present=True):
             update_club_details(conn, club_id, stadium, founded_year)
         time.sleep(ENRICH_SLEEP_SECONDS)
 
+    if not ENRICH_CLUB_TROPHIES:
+        return
+
     trophy_rows = fetch_club_trophies(club_qid)
     for row in trophy_rows:
         award_uri = row.get("award", {}).get("value")
@@ -500,6 +505,8 @@ def fetch_all_competition_champions(conn, include_predecessors=False):
         time.sleep(LEAGUE_SLEEP_SECONDS)
 
 # Progress tracking helpers use PROGRESS_FILE, imported from config.py.
+
+
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r") as f:
@@ -877,7 +884,12 @@ def main():
 
     # Complete champion history for your tracked leagues + UCL — cheap
     # (one request per competition), independent of the player pull above.
-    fetch_all_competition_champions(conn)
+    # This is NOT season-specific — skip it for repeated season-by-season
+    # historical pulls via config.FETCH_COMPETITION_CHAMPIONS.
+    if FETCH_COMPETITION_CHAMPIONS:
+        fetch_all_competition_champions(conn)
+    else:
+        print("Skipping competition champions fetch (FETCH_COMPETITION_CHAMPIONS=False in config.py).")
 
     conn.close()
     print("Done. Data is now in your local Postgres database.")
