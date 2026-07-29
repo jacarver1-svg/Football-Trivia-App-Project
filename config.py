@@ -59,10 +59,15 @@ LEAGUES = {
 # season-by-season history, so this single value is used as the season
 # marker for club_league_seasons entries, and as the default filter for
 # which club memberships count as "active" in a pull.
-CURRENT_SEASON_YEAR = 2024  # represents the 2025/26 season
+CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
 
 # ---------- Pull sizing ----------
-DEFAULT_LIMIT_PER_LEAGUE = 1500
+# Now a REAL cap on players fetched per league (see run_league_pull) —
+# no more silent auto-scaling based on club count. ~40 per club is a
+# reasonable rule of thumb for a full season's roster including in-
+# season turnover, so this default comfortably covers a ~20-club league.
+# Lower it for quick tests (e.g. 10-20).
+DEFAULT_LIMIT_PER_LEAGUE = 800
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
@@ -117,7 +122,7 @@ TROPHY_SEASON_FILTER = None
 # of which season you're currently walking through with run_league_pull().
 # When doing repeated season-by-season historical pulls, set these to
 # False to skip re-fetching the same trophy data every run.
-FETCH_COMPETITION_CHAMPIONS = False   # controls the fetch_all_competition_champions() pass
+FETCH_COMPETITION_CHAMPIONS = True   # controls the fetch_all_competition_champions() pass
 ENRICH_CLUB_TROPHIES = True          # controls the per-club P2522 trophy fetch inside enrich_club()
 
 # ---------- Progress tracking ----------

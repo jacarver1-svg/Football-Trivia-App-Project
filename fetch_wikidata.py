@@ -941,13 +941,22 @@ def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_seas
         preview = ", ".join(club_names_preview[:5]) + ("..." if len(club_names_preview) > 5 else "")
         print(f"  Found {len(season_clubs)} clubs: {preview}")
 
-        # Bounded by the actual roster size, not an arbitrary page size —
-        # generous multiplier covers in-season squad turnover.
-        fetch_limit = max(limit_per_league, len(season_clubs) * 40)
+        # limit_per_league is now a REAL cap — no more auto-scaling that
+        # silently overrides whatever you passed in. If you want the
+        # whole season's roster, pass a limit that comfortably covers it
+        # (~40 per club is a reasonable rule of thumb, accounting for
+        # in-season squad turnover); for a quick test, a small number
+        # like 10-20 now actually behaves like a quick test.
+        fetch_limit = limit_per_league
         rows = fetch_players_for_clubs(list(season_clubs.keys()), target_season, limit=fetch_limit)
         parsed = [parse_league_row(r) for r in rows]
         total_rows += len(parsed)
         league_counts[league_name] = len(parsed)
+
+        if len(parsed) >= fetch_limit:
+            suggested = len(season_clubs) * 40
+            print(f"  Hit the limit ({fetch_limit}) — you likely didn't get the full roster. "
+                  f"Try limit_per_league={suggested} or higher for the complete season.")
 
         league_id = get_or_create_league(conn, league_name, league_qid)
 
