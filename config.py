@@ -75,7 +75,7 @@ LEAGUES = {
 # season-by-season history, so this single value is used as the season
 # marker for club_league_seasons entries, and as the default filter for
 # which club memberships count as "active" in a pull.
-CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
+CURRENT_SEASON_YEAR = 2024  # represents the 2024/25 season
 
 # ---------- Pull sizing ----------
 DEFAULT_LIMIT_PER_LEAGUE = 400
