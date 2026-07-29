@@ -500,8 +500,6 @@ def fetch_all_competition_champions(conn, include_predecessors=False):
         time.sleep(LEAGUE_SLEEP_SECONDS)
 
 # Progress tracking helpers use PROGRESS_FILE, imported from config.py.
-
-
 def load_progress():
     if os.path.exists(PROGRESS_FILE):
         with open(PROGRESS_FILE, "r") as f:
