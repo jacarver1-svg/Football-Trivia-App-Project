@@ -227,27 +227,36 @@ def update_club_details(conn, club_id, stadium, founded_year):
     conn.commit()
 
 
-def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team", parent_league_id=None):
+def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team", parent_league_id=None,
+                          country_id=None, scope=None):
     """Same upsert pattern as everything else, for trophies."""
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM trophies WHERE wikidata_id = %s;", (wikidata_id,))
         row = cur.fetchone()
         if row:
+            updates, params = [], []
             if parent_league_id is not None:
-                cur.execute(
-                    "UPDATE trophies SET parent_league_id = %s WHERE id = %s;",
-                    (parent_league_id, row[0]),
-                )
+                updates.append("parent_league_id = %s")
+                params.append(parent_league_id)
+            if country_id is not None:
+                updates.append("country_id = %s")
+                params.append(country_id)
+            if scope is not None:
+                updates.append("scope = %s")
+                params.append(scope)
+            if updates:
+                params.append(row[0])
+                cur.execute(f"UPDATE trophies SET {', '.join(updates)} WHERE id = %s;", params)
                 conn.commit()
             return row[0]
         cur.execute(
             """
-            INSERT INTO trophies (wikidata_id, name, type, parent_league_id)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO trophies (wikidata_id, name, type, parent_league_id, country_id, scope)
+            VALUES (%s, %s, %s, %s, %s, %s)
             ON CONFLICT (wikidata_id) DO UPDATE SET name = EXCLUDED.name
             RETURNING id;
             """,
-            (wikidata_id, name, trophy_type, parent_league_id),
+            (wikidata_id, name, trophy_type, parent_league_id, country_id, scope),
         )
         trophy_id = cur.fetchone()[0]
     conn.commit()
@@ -400,14 +409,41 @@ def fetch_predecessor_competitions(competition_qid, max_retries=MAX_RETRIES):
     return run_sparql_query(query, max_retries=max_retries)
 
 
-def process_champion_rows(conn, rows, parent_league_id):
+def fetch_competition_country(competition_qid, max_retries=MAX_RETRIES):
+    """
+    Determines whether a competition belongs to a single country (a
+    domestic league or cup) or spans multiple countries (continental/
+    international, like the Champions League). Queried once per
+    competition — this is a property of the competition as a whole, not
+    of any individual season, so it doesn't need to be re-checked per row.
+
+    Returns (country_wikidata_id, country_name, scope) — country fields
+    are None when no single country applies (scope='continental').
+    """
+    query = f"""
+    SELECT ?country ?countryLabel WHERE {{
+      OPTIONAL {{ wd:{competition_qid} wdt:P17 ?country. }}
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+    }}
+    LIMIT 1
+    """
+    rows = run_sparql_query(query, max_retries=max_retries)
+    if rows and rows[0].get("country"):
+        country_uri = rows[0]["country"]["value"]
+        country_qid = country_uri.split("/")[-1]
+        country_name = rows[0].get("countryLabel", {}).get("value")
+        return (country_qid, country_name, "domestic")
+    return (None, None, "continental")
+
+
+def process_champion_rows(conn, rows, parent_league_id, country_id=None, scope=None):
     """
     Shared logic for turning SPARQL champion rows into database rows —
     used for both a competition's own history AND any predecessor
     competitions found via fetch_predecessor_competitions(). Passing the
-    SAME parent_league_id for both is what merges pre-rebrand and
-    post-rebrand titles into one continuous history under a single
-    leagues row.
+    SAME parent_league_id/country_id/scope for both is what merges
+    pre-rebrand and post-rebrand titles into one continuous history
+    under a single leagues row, tagged consistently.
     """
     saved = 0
     for row in rows:
@@ -435,7 +471,10 @@ def process_champion_rows(conn, rows, parent_league_id):
             winner_country_id = get_or_create_country(conn, winner_country_name, winner_country_qid)
 
         club_id = get_or_create_club(conn, winner_qid, winner_name, winner_country_id)
-        trophy_id = get_or_create_trophy(conn, season_qid, season_name, "team", parent_league_id)
+        trophy_id = get_or_create_trophy(
+            conn, season_qid, season_name, "team", parent_league_id,
+            country_id=country_id, scope=scope,
+        )
         link_club_trophy(conn, club_id, trophy_id, season_start_year)
         saved += 1
     return saved
@@ -482,8 +521,16 @@ def fetch_all_competition_champions(conn, include_predecessors=False):
             match = cur.fetchone()
             parent_league_id = match[0] if match else None
 
+        # Domestic (single country) vs continental — checked once per
+        # competition, not per season.
+        country_qid, country_name, scope = fetch_competition_country(competition_qid)
+        country_id = None
+        if country_qid and country_name:
+            country_id = get_or_create_country(conn, country_name, country_qid)
+        print(f"  Scope: {scope}" + (f" ({country_name})" if country_name else ""))
+
         rows = fetch_competition_champions(competition_qid)
-        saved = process_champion_rows(conn, rows, parent_league_id)
+        saved = process_champion_rows(conn, rows, parent_league_id, country_id=country_id, scope=scope)
 
         if include_predecessors:
             predecessors = fetch_predecessor_competitions(competition_qid)
@@ -497,7 +544,9 @@ def fetch_all_competition_champions(conn, include_predecessors=False):
                 pred_rows = fetch_competition_champions(pred_qid)
                 # Same parent_league_id as above — this is what merges
                 # the pre-rebrand titles into the current league's history.
-                saved += process_champion_rows(conn, pred_rows, parent_league_id)
+                saved += process_champion_rows(
+                    conn, pred_rows, parent_league_id, country_id=country_id, scope=scope
+                )
                 time.sleep(LEAGUE_SLEEP_SECONDS)
             saved += 1
 
@@ -548,7 +597,7 @@ def get_or_create_country(conn, name, wikidata_id):
 def get_or_create_league(conn, name, wikidata_id):
     """Same upsert pattern as get_or_create_country, for leagues."""
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM leagues WHERE name = %s;", (name,))
+        cur.execute("SELECT id FROM leagues WHERE wikidata_id = %s;", (wikidata_id,))
         row = cur.fetchone()
         if row:
             return row[0]

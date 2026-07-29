@@ -77,16 +77,18 @@ CREATE TABLE IF NOT EXISTS trophies (
     wikidata_id TEXT UNIQUE,
     name TEXT NOT NULL,
     type TEXT,                          -- 'individual' or 'team'
-    parent_league_id INT REFERENCES leagues(id)  -- NULL unless this trophy IS a specific
-                                                   -- season's league title (e.g. "2015-16
-                                                   -- Premier League"). Lets you group season-
-                                                   -- specific title rows back to "the league"
-                                                   -- itself for counting questions.
+    parent_league_id INT REFERENCES leagues(id),  -- NULL unless this trophy IS a specific
+                                                   -- season's league title
+    country_id INT REFERENCES countries(id),      -- NULL for continental/international competitions
+    scope TEXT                                     -- 'domestic' or 'continental', explicit rather
+                                                   -- than inferring it from country_id being NULL
 );
 
--- Adds the column for anyone who already ran an earlier version of this
--- schema. Safe to re-run: does nothing if the column already exists.
+-- Adds the columns for anyone who already ran an earlier version of this
+-- schema. Safe to re-run: does nothing if the columns already exist.
 ALTER TABLE trophies ADD COLUMN IF NOT EXISTS parent_league_id INT REFERENCES leagues(id);
+ALTER TABLE trophies ADD COLUMN IF NOT EXISTS country_id INT REFERENCES countries(id);
+ALTER TABLE trophies ADD COLUMN IF NOT EXISTS scope TEXT;
 
 -- Individual awards only (Ballon d'Or, Golden Boot, etc.) — these
 -- belong directly to a player, with no club/season derivation needed.
