@@ -58,16 +58,6 @@ SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?clubLabel WHERE {{
 LIMIT {limit}
 """
 
-# Add/remove leagues here — display name -> Wikidata QID.
-# Look up new ones at wikidata.org (search the league, QID is on the item page).
-LEAGUES = {
-    "Premier League": "Q9448",
-    "La Liga": "Q324867",
-    "Bundesliga": "Q82595",
-    "Serie A": "Q15804",
-    "Ligue 1": "Q13394",
-}
-
 # Pulls players across ANY of the leagues listed in LEAGUES, in one request,
 # instead of looping per country. Captures each player's own nationality
 # inline, since we're no longer fixing the country ahead of time.
