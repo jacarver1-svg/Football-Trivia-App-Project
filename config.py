@@ -21,6 +21,7 @@ DB_CONFIG = {
 
 # ---------- Wikidata request settings ----------
 WIKIDATA_SPARQL_URL = "https://query.wikidata.org/sparql"
+WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 
 HEADERS = {
 "User-Agent": "FootballTriviaApp/0.1 (https://github.com/jacarver1-svg/Football-Trivia-App-Project; contact: jacarver1@gmail.com)"
