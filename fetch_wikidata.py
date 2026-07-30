@@ -37,6 +37,7 @@ from config import (
     DEFAULT_LIMIT_PER_LEAGUE,
     ENRICH_SLEEP_SECONDS,
     LEAGUE_SLEEP_SECONDS,
+    MANUAL_SEASON_CLUBS,
     TROPHY_SEASON_FILTER,
     FETCH_COMPETITION_CHAMPIONS,
     ENRICH_CLUB_TROPHIES,
@@ -61,34 +62,59 @@ LIMIT {limit}
 # Pulls players across ANY of the leagues listed in LEAGUES, in one request,
 # instead of looping per country. Captures each player's own nationality
 # inline, since we're no longer fixing the country ahead of time.
-LEAGUE_QUERY_TEMPLATE = """
+# Finds the specific season ITEM for a competition (e.g. "2024-25 Premier
+# League"), not the competition item itself. Same P3450 relationship
+# already used by COMPETITION_CHAMPIONS_QUERY for trophy history.
+SEASON_ITEM_QUERY = """
+SELECT ?season ?seasonLabel ?startTime WHERE {{
+  ?season wdt:P3450 wd:{competition_qid}.  # season is an edition of this competition
+  OPTIONAL {{ ?season wdt:P580 ?startTime. }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+}}
+"""
+
+# P1923 ("participating team") is usually stored on the season item, but
+# editors often instead (or additionally) record the reverse statement --
+# P1344 ("participant in") on the CLUB item, pointing at the season. The
+# two are supposed to be reciprocal but frequently aren't kept in sync, so
+# checking both surfaces far more leagues than P1923 alone.
+SEASON_PARTICIPANTS_QUERY = """
+SELECT DISTINCT ?team ?teamLabel ?teamCountry ?teamCountryLabel WHERE {{
+  {{ wd:{season_qid} wdt:P1923 ?team. }}
+  UNION
+  {{ ?team wdt:P1344 wd:{season_qid}. }}
+  OPTIONAL {{ ?team wdt:P17 ?teamCountry. }}
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+}}
+"""
+
+# Pulls players ONLY from the pre-confirmed club list for this league's
+# season (resolved via fetch_league_season_clubs() below) -- so a player
+# can only be attributed to a league/season if their club was actually
+# verified to be IN that league that season, not just whatever a club's
+# current P118 happens to say.
+SEASON_CLUB_PLAYERS_QUERY = """
 SELECT ?player ?playerLabel ?birthDate ?birthPlaceLabel ?position ?positionLabel
-       ?club ?clubLabel ?clubCountry ?clubCountryLabel
-       ?nationality ?nationalityLabel
-       ?league ?leagueLabel
-       ?start ?end ?transferType ?transferTypeLabel WHERE {{
-  VALUES ?league {{ {league_qids} }}
+       ?club ?start ?end ?transferType ?transferTypeLabel
+       ?nationality ?nationalityLabel WHERE {{
+  VALUES ?club {{ {club_qids} }}
 
   ?player wdt:P106 wd:Q937857.        # occupation: football player
   ?player wdt:P21 wd:Q6581097.        # sex or gender: male
   ?player wdt:P27 ?nationality.       # country of citizenship
 
   ?player p:P54 ?membership.          # a specific club-membership fact
-  ?membership ps:P54 ?club.           # ...which club
-  ?club wdt:P118 ?league.             # club plays in one of the leagues above
+  ?membership ps:P54 ?club.           # ...at one of the confirmed season clubs
 
-  OPTIONAL {{ ?club wdt:P17 ?clubCountry. }}          # club's country
-  ?membership pq:P580 ?start.                          # start time (required, not optional — needed for the season filter below)
+  ?membership pq:P580 ?start.                          # start time (required — needed for the season filter below)
   OPTIONAL {{ ?membership pq:P582 ?end. }}            # qualifier: end time
   OPTIONAL {{ ?membership pq:P1642 ?transferType. }}  # qualifier: acquisition transaction (loan/transfer/free transfer)
   OPTIONAL {{ ?player wdt:P569 ?birthDate. }}
   OPTIONAL {{ ?player wdt:P19 ?birthPlace. }}
   OPTIONAL {{ ?player wdt:P413 ?position. }}          # position played on team / speciality
 
-  # Only keep memberships that were active during the target season —
-  # started on or before it, and either still ongoing or didn't end
-  # before the season began. This is what excludes historical players
-  # from clubs' 1800s/1900s-era squads.
+  # Same active-during-the-season filter as before, now layered on top
+  # of a club list that's already confirmed correct for this season.
   FILTER(YEAR(?start) <= {target_season})
   FILTER(!BOUND(?end) || YEAR(?end) >= {target_season})
 
@@ -286,6 +312,30 @@ def fetch_club_details(club_qid, max_retries=3):
     rows = run_sparql_query(query, max_retries=max_retries)
     return rows[0] if rows else None
 
+def fetch_club_basic_info(club_qids, max_retries=MAX_RETRIES):
+    """Looks up name/country for a manually-supplied list of club QIDs."""
+    if not club_qids:
+        return []
+    values = " ".join(f"wd:{q}" for q in club_qids)
+    query = f"""
+    SELECT ?team ?teamLabel ?teamCountry ?teamCountryLabel WHERE {{
+      VALUES ?team {{ {values} }}
+      OPTIONAL {{ ?team wdt:P17 ?teamCountry. }}
+      SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en,mul,es,fr,de,it,pt". }}
+    }}
+    """
+    rows = run_sparql_query(query, max_retries=max_retries)
+    clubs = []
+    for row in rows:
+        team_uri = row.get("team", {}).get("value")
+        team_qid = team_uri.split("/")[-1] if team_uri else None
+        team_name = row.get("teamLabel", {}).get("value")
+        country_uri = row.get("teamCountry", {}).get("value")
+        country_qid = country_uri.split("/")[-1] if country_uri else None
+        country_name = row.get("teamCountryLabel", {}).get("value")
+        if team_qid and team_name:
+            clubs.append((team_qid, team_name, country_qid, country_name))
+    return clubs
 
 def fetch_club_trophies(club_qid, max_retries=3, season_filter=TROPHY_SEASON_FILTER):
     """
@@ -794,29 +844,120 @@ def fetch_players(country_qid, limit=50):
     return response.json()["results"]["bindings"]
 
 
-def fetch_top_league_players(league_qid, target_season, limit=50, offset=0, max_retries=3):
+def fetch_league_season_clubs(competition_qid, target_season, max_retries=MAX_RETRIES):
     """
-    Fetch male players for ONE league QID, restricted to memberships
-    active during target_season, starting at `offset` in a deterministic
-    ORDER BY ?player ordering — this is what makes pagination reliable
-    (a plain LIMIT with no ORDER BY has no guaranteed order, so re-running
-    it just returns an arbitrary, possibly-repeated slice).
+    Resolves the actual set of clubs Wikidata records as having PARTICIPATED
+    in this competition during target_season, via the season item's P1923
+    statements -- not via each club's current (and frequently stale/
+    overwritten-on-promotion) P118 value.
 
-    Uses the shared run_sparql_query() helper, which retries on transient
-    server errors (502/503/504) and respects Wikidata's rate-limit
-    signals (429 + Retry-After) if we're going too fast.
+    Returns a list of (club_qid, club_name, club_country_qid, club_country_name)
+    tuples. Empty list means no season item / no P1923 data was found for
+    this competition+year (common for lower divisions or older seasons —
+    check manually before assuming zero clubs is correct).
     """
-    query = LEAGUE_QUERY_TEMPLATE.format(
-        league_qids=f"wd:{league_qid}", target_season=target_season, offset=offset, limit=limit
+    if league_name and (league_name, target_season) in MANUAL_SEASON_CLUBS:
+            return fetch_club_basic_info(MANUAL_SEASON_CLUBS[(league_name, target_season)], max_retries=max_retries)
+
+    season_query = SEASON_ITEM_QUERY.format(competition_qid=competition_qid)
+    season_rows = run_sparql_query(season_query, max_retries=max_retries)
+
+    season_qid = None
+    for row in season_rows:
+        season_uri = row.get("season", {}).get("value")
+        label = row.get("seasonLabel", {}).get("value")
+        start_time = row.get("startTime", {}).get("value")
+        if season_uri and extract_season_start_year(label, start_time) == target_season:
+            season_qid = season_uri.split("/")[-1]
+            break
+
+    if not season_qid:
+        return []
+
+    participants_query = SEASON_PARTICIPANTS_QUERY.format(season_qid=season_qid)
+    rows = run_sparql_query(participants_query, max_retries=max_retries)
+
+    clubs = []
+    for row in rows:
+        team_uri = row.get("team", {}).get("value")
+        team_qid = team_uri.split("/")[-1] if team_uri else None
+        team_name = row.get("teamLabel", {}).get("value")
+        country_uri = row.get("teamCountry", {}).get("value")
+        country_qid = country_uri.split("/")[-1] if country_uri else None
+        country_name = row.get("teamCountryLabel", {}).get("value")
+        if team_qid and team_name:
+            clubs.append((team_qid, team_name, country_qid, country_name))
+    return clubs
+
+
+def fetch_season_club_players(club_qids, target_season, limit=50, offset=0, max_retries=MAX_RETRIES):
+    """
+    Fetch players for a pre-confirmed set of clubs (the real season roster
+    from fetch_league_season_clubs()), restricted to memberships active
+    during target_season. Same OFFSET/LIMIT pagination as before.
+    """
+    if not club_qids:
+        return []
+    club_values = " ".join(f"wd:{qid}" for qid in club_qids)
+    query = SEASON_CLUB_PLAYERS_QUERY.format(
+        club_qids=club_values, target_season=target_season, offset=offset, limit=limit
     )
     return run_sparql_query(query, max_retries=max_retries)
 
 
-def parse_league_row(row):
+def preview_season_clubs(target_season=CURRENT_SEASON_YEAR, leagues=None):
     """
-    Pulls every piece we need out of one Wikidata result row: player,
-    their country, the club, the club's country, the league, and the
-    start/end years of that specific club membership.
+    Dry run: prints which clubs would be linked to each league for
+    target_season, without touching the database. Run this FIRST after
+    changing CURRENT_SEASON_YEAR (or before trusting this approach at all)
+    to sanity-check the resolved club list against what you know to be
+    true (right count, no obviously wrong/missing clubs).
+    """
+    for league_name, league_qid in (leagues or LEAGUES).items():
+        clubs = fetch_league_season_clubs(league_qid, target_season, league_name=league_name)
+        print(f"{league_name} ({target_season}/{str(target_season + 1)[-2:]}): {len(clubs)} clubs")
+        for club_qid, club_name, _, _ in clubs:
+            print(f"  - {club_name} ({club_qid})")
+        time.sleep(LEAGUE_SLEEP_SECONDS)
+
+def diagnose_league_seasons(target_season, leagues=None):
+    """
+    For each league, checks whether Wikidata has (a) a season item matching
+    target_season at all, and (b) whether that season item has P1923
+    (participating team) data populated yet. Distinguishes "no season item
+    found" from "season item exists but is empty" -- preview_season_clubs()
+    only shows you the end result (0 clubs), not which of those two this is.
+    """
+    for league_name, league_qid in (leagues or LEAGUES).items():
+        season_rows = run_sparql_query(SEASON_ITEM_QUERY.format(competition_qid=league_qid))
+
+        season_qid = None
+        matched_label = None
+        for row in season_rows:
+            season_uri = row.get("season", {}).get("value")
+            label = row.get("seasonLabel", {}).get("value")
+            start_time = row.get("startTime", {}).get("value")
+            if season_uri and extract_season_start_year(label, start_time) == target_season:
+                season_qid = season_uri.split("/")[-1]
+                matched_label = label
+                break
+
+        if not season_qid:
+            print(f"{league_name}: NO SEASON ITEM found for {target_season} ({len(season_rows)} season items exist total for this competition)")
+            time.sleep(LEAGUE_SLEEP_SECONDS)
+            continue
+
+        participants = run_sparql_query(SEASON_PARTICIPANTS_QUERY.format(season_qid=season_qid))
+        status = "OK" if participants else "EMPTY -- season item exists but no P1923 data yet"
+        print(f"{league_name}: {matched_label!r} ({season_qid}) -> {len(participants)} clubs [{status}]")
+        time.sleep(LEAGUE_SLEEP_SECONDS)
+
+def parse_season_player_row(row):
+    """
+    Pulls player + club-membership fields out of one SEASON_CLUB_PLAYERS_QUERY
+    result row. Club identity/name/country are NOT re-parsed here — they're
+    already known from fetch_league_season_clubs(), which run_league_pull()
+    uses to map ?club back to the right club_id.
     """
     def get(field):
         return row.get(field, {}).get("value")
@@ -834,11 +975,6 @@ def parse_league_row(row):
         "nationality_wikidata_id": qid("nationality"),
         "nationality_name": get("nationalityLabel"),
         "club_wikidata_id": qid("club"),
-        "club_name": get("clubLabel"),
-        "club_country_wikidata_id": qid("clubCountry"),
-        "club_country_name": get("clubCountryLabel"),
-        "league_wikidata_id": qid("league"),
-        "league_name": get("leagueLabel"),
         "start_year": int(get("start")[:4]) if get("start") else None,
         "end_year": int(get("end")[:4]) if get("end") else None,
         "transfer_type": get("transferTypeLabel"),
@@ -908,70 +1044,69 @@ def run_country_pull(conn):
 
 def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_season=CURRENT_SEASON_YEAR):
     """
-    Pull players from EACH league, for a SPECIFIC season, using the
-    season's actual club roster (via fetch_season_clubs/P1923) rather
-    than each club's current league (P118) — this is what makes walking
-    backward through past seasons return that season's real clubs
-    (including promoted/relegated ones) instead of today's lineup every
-    time.
+    Pull players from EACH league separately, restricted to memberships
+    active during target_season. Club-to-league linkage now comes from the
+    season item's confirmed participant list (P1923), not from each club's
+    current P118 value, so promoted/relegated clubs land in the correct
+    season instead of whichever league they're in as of right now.
 
-    Each league+season combination is fetched in full in one pass (no
-    offset/pagination needed here, since a season's roster is naturally
-    bounded — unlike the old approach, which paginated through an
-    unbounded, ever-growing pool of "any club currently in this league,
-    any point in their history").
+    `target_season` controls WHICH season is pulled (defaults to
+    CURRENT_SEASON_YEAR from config.py). `limit_per_league` controls how
+    many player rows are fetched per league per run (defaults to
+    DEFAULT_LIMIT_PER_LEAGUE from config.py) — both overridable by passing
+    different values in, e.g. run_league_pull(conn, limit_per_league=500, target_season=2022).
     """
+    progress = load_progress()
     league_counts = {}
     players_seen = set()
-    enriched_clubs = set()  # tracks which club_ids we've already enriched THIS run
+    enriched_clubs = set()
     total_rows = 0
 
     for league_name, league_qid in LEAGUES.items():
-        print(f"Finding {league_name} clubs for the {target_season}/{str(target_season + 1)[-2:]} season...")
-        season_clubs = fetch_season_clubs(league_qid, target_season)
-
+        print(f"Resolving {league_name} clubs for the {target_season}/{str(target_season + 1)[-2:]} season...")
+        season_clubs = fetch_league_season_clubs(league_qid, target_season, league_name=league_name)
         if not season_clubs:
-            print(f"  No season-edition club data found for {league_name} in {target_season} "
-                  f"— skipping (Wikidata may not have this season modeled for this league).")
+            print(f"  No season item / participating-team data found for {league_name} in {target_season} — skipping.")
             league_counts[league_name] = 0
             time.sleep(LEAGUE_SLEEP_SECONDS)
             continue
 
-        club_names_preview = list(season_clubs.values())
-        preview = ", ".join(club_names_preview[:5]) + ("..." if len(club_names_preview) > 5 else "")
-        print(f"  Found {len(season_clubs)} clubs: {preview}")
+        league_id = get_or_create_league(conn, league_name, league_qid)
 
-        # limit_per_league is now a REAL cap — no more auto-scaling that
-        # silently overrides whatever you passed in. If you want the
-        # whole season's roster, pass a limit that comfortably covers it
-        # (~40 per club is a reasonable rule of thumb, accounting for
-        # in-season squad turnover); for a quick test, a small number
-        # like 10-20 now actually behaves like a quick test.
-        fetch_limit = limit_per_league
-        rows = fetch_players_for_clubs(list(season_clubs.keys()), target_season, limit=fetch_limit)
-        parsed = [parse_league_row(r) for r in rows]
+        # Record every club Wikidata's season item says actually played in
+        # this league this season, regardless of whether any of their
+        # players get matched below.
+        club_lookup = {}  # club_qid -> our internal club_id
+        for club_qid, club_name, club_country_qid, club_country_name in season_clubs:
+            club_country_id = None
+            if club_country_qid and club_country_name:
+                club_country_id = get_or_create_country(conn, club_country_name, club_country_qid)
+            club_id = get_or_create_club(conn, club_qid, club_name, club_country_id)
+            link_club_to_league(conn, club_id, league_id, target_season)
+            club_lookup[club_qid] = club_id
+        print(f"  {len(club_lookup)} clubs confirmed in {league_name} for this season.")
+        time.sleep(LEAGUE_SLEEP_SECONDS)
+
+        progress_key = f"{league_name}_{target_season}"
+        offset = progress.get(progress_key, 0)
+        print(f"  Fetching players (limit={limit_per_league}, offset={offset})...")
+        rows = fetch_season_club_players(
+            list(club_lookup.keys()), target_season, limit=limit_per_league, offset=offset
+        )
+        parsed = [parse_season_player_row(r) for r in rows]
         total_rows += len(parsed)
         league_counts[league_name] = len(parsed)
-
-        if len(parsed) >= fetch_limit:
-            suggested = len(season_clubs) * 40
-            print(f"  Hit the limit ({fetch_limit}) — you likely didn't get the full roster. "
-                  f"Try limit_per_league={suggested} or higher for the complete season.")
-
-        league_id = get_or_create_league(conn, league_name, league_qid)
 
         for r in parsed:
             if not r["player_wikidata_id"] or not r["player_name"]:
                 continue  # skip incomplete rows
 
-            # --- country ---
             country_id = None
             if r["nationality_wikidata_id"] and r["nationality_name"]:
                 country_id = get_or_create_country(
                     conn, r["nationality_name"], r["nationality_wikidata_id"]
                 )
 
-            # --- player ---
             player_id = get_or_create_player(conn, {
                 "wikidata_id": r["player_wikidata_id"],
                 "name": r["player_name"],
@@ -982,47 +1117,34 @@ def run_league_pull(conn, limit_per_league=DEFAULT_LIMIT_PER_LEAGUE, target_seas
             })
             if player_id is None:
                 continue
-
             players_seen.add(r["player_wikidata_id"])
 
-            # --- club (skip row cleanly if club data is missing) ---
-            if not r["club_wikidata_id"] or not r["club_name"]:
-                continue
+            club_id = club_lookup.get(r["club_wikidata_id"])
+            if club_id is None:
+                continue  # VALUES already restricted to confirmed clubs; guard just in case
 
-            club_country_id = None
-            if r["club_country_wikidata_id"] and r["club_country_name"]:
-                club_country_id = get_or_create_country(
-                    conn, r["club_country_name"], r["club_country_wikidata_id"]
-                )
-
-            club_id = get_or_create_club(
-                conn, r["club_wikidata_id"], r["club_name"], club_country_id
-            )
-
-            # Fetch stadium/founded_year/trophies ONCE per club per run,
-            # not once per player — clubs get revisited by many players.
+            # Fetch stadium/founded_year/trophies ONCE per club per run.
             if club_id not in enriched_clubs:
                 enrich_club(conn, club_id, r["club_wikidata_id"])
                 enriched_clubs.add(club_id)
 
-            # This club is now KNOWN (via P1923) to have actually played
-            # in this league during target_season — not assumed from its
-            # current league the way the old approach worked.
-            link_club_to_league(conn, club_id, league_id, target_season)
-
-            # --- player <-> club stint ---
             if r["start_year"]:
                 clean_start, clean_end, issue = stint_dates_look_valid(
                     r["start_year"], r["end_year"], r["birth_date"]
                 )
                 if issue:
-                    print(f"    Data quality note for {r['player_name']} at {r['club_name']}: {issue}")
+                    print(f"    Data quality note for {r['player_name']}: {issue}")
                 if clean_start:
                     link_player_to_club(
                         conn, player_id, club_id, clean_start, clean_end, r["transfer_type"]
                     )
 
-        time.sleep(LEAGUE_SLEEP_SECONDS)  # polite delay between leagues
+        time.sleep(LEAGUE_SLEEP_SECONDS)
+
+        progress[progress_key] = offset + len(parsed)
+        save_progress(progress)
+        if len(parsed) < limit_per_league:
+            print(f"  (Got fewer than requested — {league_name} may be running low on new matches.)")
 
     print(f"Processed {total_rows} rows, {len(players_seen)} unique players, {len(enriched_clubs)} clubs enriched (stadium/founded/trophies), across {len(LEAGUES)} leagues.")
     print("Breakdown by league (row matches, not unique players):")
