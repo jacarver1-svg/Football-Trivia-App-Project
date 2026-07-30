@@ -27,6 +27,7 @@ from config import (
     DB_CONFIG,
     HEADERS,
     WIKIDATA_SPARQL_URL,
+    WIKIDATA_API_URL,
     LEAGUES,
     TROPHY_COMPETITIONS,
     CURRENT_SEASON_YEAR,
@@ -398,6 +399,80 @@ def get_or_create_trophy(conn, wikidata_id, name, trophy_type="team", parent_lea
     conn.commit()
     return trophy_id
 
+def search_club_qid(name, max_retries=MAX_RETRIES):
+    """
+    Searches Wikidata by name via the wbsearchentities API (a plain text
+    search, not SPARQL) and returns candidate (qid, label, description)
+    matches. Ambiguous names return multiple candidates -- always check the
+    description (it usually says the club's sport/country) before picking one.
+    """
+    params = {
+        "action": "wbsearchentities",
+        "search": name,
+        "language": "en",
+        "type": "item",
+        "format": "json",
+        "limit": 10,
+    }
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = requests.get(WIKIDATA_API_URL, params=params, headers=HEADERS, timeout=SPARQL_TIMEOUT)
+            response.raise_for_status()
+            results = response.json().get("search", [])
+            return [(r["id"], r.get("label", ""), r.get("description", "")) for r in results]
+        except requests.exceptions.RequestException:
+            if attempt < max_retries:
+                time.sleep(RETRY_BASE_WAIT * attempt)
+                continue
+            raise
+
+
+def build_manual_season_clubs_snippet(league_name, target_season, club_names):
+    """
+    Semi-automates a MANUAL_SEASON_CLUBS entry: takes a plain list of club
+    names (copy-paste them straight out of the Wikipedia season page's
+    table) and resolves each to a QID, printing a ready-to-paste config.py
+    snippet with the club name kept as an inline comment for auditability.
+    Ambiguous or unmatched names are flagged instead of guessed -- fix
+    those lines by hand before pasting.
+    """
+    print(f'MANUAL_SEASON_CLUBS[("{league_name}", {target_season})] = [')
+    for name in club_names:
+        candidates = search_club_qid(name)
+        football_candidates = [
+            c for c in candidates
+            if any(word in c[2].lower() for word in ("football", "soccer", "f.c.", "fc "))
+        ]
+        if len(football_candidates) == 1:
+            qid, label, desc = football_candidates[0]
+            print(f'    "{qid}",  # {label} -- {desc}')
+        elif football_candidates:
+            print(f'    # AMBIGUOUS for "{name}", pick one:')
+            for qid, label, desc in football_candidates:
+                print(f'    #   "{qid}",  # {label} -- {desc}')
+        else:
+            print(f'    # NO FOOTBALL-CLUB MATCH for "{name}" -- check spelling or search manually')
+        time.sleep(0.5)
+    print("]")
+
+def preview_club_roster(club_qid, target_season, limit=30):
+    """
+    Sanity check for a single club QID before trusting it: prints the
+    players Wikidata has on record with a club membership active during
+    target_season. Catches wrong QIDs (reserve team, a same-named club in
+    a different country, a women's team, etc.) before they pollute your
+    database -- if the names printed don't look like who you'd expect at
+    that club that season, the QID is probably wrong.
+    """
+    rows = fetch_season_club_players([club_qid], target_season, limit=limit)
+    if not rows:
+        print(f"  No players found for {club_qid} in {target_season} -- wrong QID, or no qualified P54 data for that season.")
+        return
+    print(f"  {len(rows)} player(s) found for {club_qid} in {target_season}:")
+    for row in rows:
+        name = row.get("playerLabel", {}).get("value", "?")
+        pos = row.get("positionLabel", {}).get("value", "")
+        print(f"    - {name}" + (f" ({pos})" if pos else ""))
 
 def link_club_trophy(conn, club_id, trophy_id, season_start_year):
     """Insert a club_trophies row, ignoring if it already exists."""
@@ -844,7 +919,7 @@ def fetch_players(country_qid, limit=50):
     return response.json()["results"]["bindings"]
 
 
-def fetch_league_season_clubs(competition_qid, target_season, max_retries=MAX_RETRIES):
+def fetch_league_season_clubs(competition_qid, target_season, league_name=None, max_retries=MAX_RETRIES):
     """
     Resolves the actual set of clubs Wikidata records as having PARTICIPATED
     in this competition during target_season, via the season item's P1923
