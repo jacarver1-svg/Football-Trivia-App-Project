@@ -59,7 +59,7 @@ LEAGUES = {
 # season-by-season history, so this single value is used as the season
 # marker for club_league_seasons entries, and as the default filter for
 # which club memberships count as "active" in a pull.
-CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
+CURRENT_SEASON_YEAR = 2024  # represents the 2025/26 season
 
 # ---------- Pull sizing ----------
 # Now a REAL cap on players fetched per league (see run_league_pull) —
@@ -67,7 +67,7 @@ CURRENT_SEASON_YEAR = 2025  # represents the 2025/26 season
 # reasonable rule of thumb for a full season's roster including in-
 # season turnover, so this default comfortably covers a ~20-club league.
 # Lower it for quick tests (e.g. 10-20).
-DEFAULT_LIMIT_PER_LEAGUE = 800
+DEFAULT_LIMIT_PER_LEAGUE = 1600
 
 # ---------- Pacing between requests ----------
 # Keep these conservative — Wikidata's public endpoint is free and
@@ -75,6 +75,14 @@ DEFAULT_LIMIT_PER_LEAGUE = 800
 # on heavier qualifier-based queries under load.
 ENRICH_SLEEP_SECONDS = 1.5   # delay between a club's detail/trophy requests
 LEAGUE_SLEEP_SECONDS = 1     # delay between leagues within one pull
+
+# Manual override for leagues where Wikidata's season items don't have
+# P1923/P1344 participant data yet (see diagnose_league_seasons()).
+# Cross-reference the season's Wikipedia page, look up each club's QID at
+# wikidata.org, and list them here. Key is (league_name, season_year).
+MANUAL_SEASON_CLUBS = {
+    # ("Serie A", 2024): ["Q1234", "Q5678", ...],
+}
 
 # ---------- Competitions to fetch COMPLETE champion history for ----------
 # Unlike per-club discovery (which only surfaces what's backfilled on
